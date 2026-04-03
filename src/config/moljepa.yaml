@@ -1,0 +1,170 @@
+seed: 42
+trainer:
+  _target_: lightning.Trainer
+  max_epochs: 1000
+  accelerator: gpu
+  devices: 1
+  precision: 32
+  num_sanity_val_steps: 0
+  enable_checkpointing: false
+  logger:
+    _target_: lightning.pytorch.loggers.TensorBoardLogger
+    name: mol-jepa
+    save_dir: ./logs/
+
+module:
+  optimizer:
+    lr: 0.001
+    weight_decay: 0.0001
+  modalities: ${data.modalities}
+  labels: ${data.labels}
+  label_strategy: ${data.label_strategy}
+  moe_encoder:
+    hidden_dim: 128
+    masking_strategy: ratio_first_pass
+    masking_ratio: 0.1
+    lambda: 0.7
+    use_prediction_head: false
+    use_loss_projection: false
+    dropout: 0.4
+  expert_encoders:
+    graph_encoder:
+      layers: 3
+      layer_type: TransformerConv
+      hidden_dim: ${module.moe_encoder.hidden_dim}
+      output_dim: ${module.moe_encoder.hidden_dim}
+      activation: gelu
+      dropout: ${module.moe_encoder.dropout}
+      attn_heads: 8
+      pooling: mean
+    emb_encoder:
+      layers: 3
+      hidden_dim: ${module.moe_encoder.hidden_dim}
+      output_dim: ${module.moe_encoder.hidden_dim}
+      activation: gelu
+      dropout: ${module.moe_encoder.dropout}
+    atom_encoder:
+      layers: 2
+      hidden_dim: ${module.moe_encoder.hidden_dim}
+      output_dim: ${module.moe_encoder.hidden_dim}
+      attn_heads: 2
+data:
+  filename: merged_data_deduplicated_with_benchmarks_n=200k.csv
+  num_workers: 128
+  batch_size: 64
+  drop_last: true
+  shuffle: false
+  recreate: false
+  metadata_cols:
+    - smiles
+    - dataset
+    - chembl_id
+    - provided_split
+  modalities:
+  - name: chemgpt
+    input: smiles
+    output: embedding
+    dim: 2048
+    processing: batch
+    batch_size: 128
+  - name: graph
+    input: smiles
+    output: graph
+    node_dim: 82
+    edge_dim: 17
+    processing: multiprocess
+  # - name: uma
+  #   input: ase
+  #   output: atoms
+  #   node_dim: 128
+  #   processing: batch
+  #   batch_size: 64
+  - name: uma
+    input: precomputed_node
+    output: atoms
+    colname: uma_embedding_path
+    node_dim: 128
+    processing: multiprocess
+  - name: boltz
+    input: precomputed
+    output: embedding
+    colname: boltz_embedding_path
+    dim: 6912
+    processing: multiprocess
+  - name: moe
+    input: precomputed
+    output: embedding
+    colname: moe_descriptors_path
+    dim: 227
+    processing: multiprocess
+  labels:
+  - name: chembl_targets
+    colname: chembl_targets_path
+    dim: 296
+  - name: tdc_targets
+    colname: tdc_targets_path
+    dim: 672
+  - name: pcba_targets
+    colname: pcba_targets_path
+    dim: 1328
+  - name: nabla_targets
+    colname: nabla_targets_path
+    dim: 17
+  label_strategy: none # modality, label
+  benchmark_labels:
+    asap_potency: 
+      type: regression
+      labels:
+      - pIC50 (MERS-CoV Mpro) # log IC50, Target MAE: < 0.5
+      - pIC50 (SARS-CoV-2 Mpro) # log IC50, Target MAE: < 0.5
+    asap_admet:
+      type: regression
+      labels:
+      - HLM # Human liver microsome intrinsic clearance, Target MAE: < 0.5
+      - KSOL # Kinetic solubility, log10 g/L, Target MAE: < 0.5
+      - LogD # Octanol-water partition coefficient, Target MAE: < 0.5
+      - MDR1-MDCKII # P-glycoprotein substrate, Target MAE: < 0.5
+      - MLM # Microsomal stability, Target MAE: < 0.5
+    # biogen_adme:
+    #   type: regression
+    #   labels:
+    #   - hlm_clint
+    #   - mdr1_mdck_er
+    #   - plasma_protein_binding_human
+    #   - plasma_protein_binding_rat
+    #   - rlm_clint
+    #   - solubility_ph_6_8
+    # tox21_linz:
+    #   type: classification
+    #   labels:
+    #   - NR-AR
+    #   - NR-AR-LBD
+    #   - NR-AhR
+    #   - NR-Aromatase
+    #   - NR-ER
+    #   - NR-ER-LBD
+    #   - NR-PPAR-gamma
+    #   - SR-ARE
+    #   - SR-ATAD5
+    #   - SR-HSE
+    #   - SR-MMP
+    #   - SR-p53
+    expansionrx:
+      type: regression
+      labels:
+      - Caco-2 Permeability Efflux
+      - Caco-2 Permeability Papp A
+      - HLM CLint
+      - KSOL
+      - LogD
+      - MBPB
+      - MGMB
+      - MLM CLint
+      - MPPB
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: false

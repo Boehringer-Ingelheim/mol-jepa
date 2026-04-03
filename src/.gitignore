@@ -1,0 +1,7 @@
+logs
+outputs
+.hydra
+.ipynb_checkpoints
+*/**/__pycache__
+multirun
+slurm_logs
