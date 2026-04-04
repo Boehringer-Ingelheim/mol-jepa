@@ -1,3 +1,4 @@
+import torch
 from torch import nn
 import torch.nn.functional as F
 from torch_geometric.nn import TransformerConv, global_mean_pool, global_max_pool
@@ -18,20 +19,38 @@ class GraphEncoder(nn.Module):
         pooling: str = "mean",
     ):
         super().__init__()
+
+        ACTIVATIONS = {"gelu": F.gelu, "relu": F.relu}
+        if activation not in ACTIVATIONS:
+            raise ValueError(f"Unknown activation: {activation}")
+        self.act = ACTIVATIONS[activation]
+
+        if pooling == "mean":
+            self.pool = global_mean_pool
+        elif pooling == "max":
+            self.pool = global_max_pool
+        else:
+            raise ValueError(f"Unknown pooling: {pooling}")
+
+        self.dropout = dropout
+
         self.convs = nn.ModuleList()
         self.norms = nn.ModuleList()
-        self.pooling = pooling
-        self.activation = activation
-        self.dropout = dropout
 
         in_dim = node_dim
         for _ in range(layers):
             if layer_type == "TransformerConv":
-                self.convs.append(
-                    TransformerConv(
-                        in_dim, hidden_dim, edge_dim=edge_dim, heads=attn_heads, concat=False
-                    )
+                conv = TransformerConv(
+                    in_dim,
+                    hidden_dim,
+                    edge_dim=edge_dim,
+                    heads=attn_heads,
+                    concat=False,
                 )
+            else:
+                raise ValueError(f"Unknown layer type: {layer_type}")
+
+            self.convs.append(conv)
             self.norms.append(nn.LayerNorm(hidden_dim))
             in_dim = hidden_dim
 
@@ -39,15 +58,13 @@ class GraphEncoder(nn.Module):
 
     def forward(self, x, edge_index, edge_attr, batch):
         for conv, norm in zip(self.convs, self.norms):
-            if self.activation == "gelu":
-                x = F.gelu(conv(x, edge_index, edge_attr))
-            elif self.activation == "relu":
-                x = F.relu(conv(x, edge_index, edge_attr))
-            x = norm(x)
+            x = conv(x, edge_index, edge_attr)
+            x = self.act(x)
+
             if self.dropout > 0:
                 x = F.dropout(x, p=self.dropout, training=self.training)
-        if self.pooling == "mean":
-            x = global_mean_pool(x, batch)
-        elif self.pooling == "max":
-            x = global_max_pool(x, batch)
+
+            x = norm(x)
+
+        x = self.pool(x, batch)
         return self.proj(x)

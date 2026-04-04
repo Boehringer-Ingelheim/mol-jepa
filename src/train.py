@@ -103,7 +103,12 @@ def main(cfg: DictConfig):
     logger.info("Added callbacks...")
 
     manager = spt.Manager(trainer=trainer, module=module, data=data, seed=cfg.seed)
+    # Start training
     manager()
+
+    # Return for HP search
+    best_loss = trainer.callback_metrics["eval/probe_expansionrx_regression_LogD_mae"]
+    return best_loss.item() if best_loss is not None else None
 
 
 if __name__ == "__main__":

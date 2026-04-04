@@ -1,7 +1,7 @@
 seed: 42
 trainer:
   _target_: lightning.Trainer
-  max_epochs: 1000
+  max_epochs: 1
   accelerator: gpu
   devices: 1
   precision: 32
@@ -26,6 +26,7 @@ module:
     lambda: 0.7
     use_prediction_head: false
     use_loss_projection: false
+    pooling_strategy: mean
     dropout: 0.4
   expert_encoders:
     graph_encoder:
@@ -48,8 +49,9 @@ module:
       hidden_dim: ${module.moe_encoder.hidden_dim}
       output_dim: ${module.moe_encoder.hidden_dim}
       attn_heads: 2
+      dropout: ${module.moe_encoder.dropout}
 data:
-  filename: merged_data_deduplicated_with_benchmarks_n=200k.csv
+  filename: merged_data_deduplicated_with_benchmarks_n=800.csv
   num_workers: 128
   batch_size: 64
   drop_last: true

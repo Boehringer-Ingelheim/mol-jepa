@@ -55,6 +55,7 @@ class MolJEPA(nn.Module):
                     hidden_dim=spec["hidden_dim"],
                     output_dim=spec["output_dim"],
                     attn_heads=spec["attn_heads"],
+                    dropout=spec["dropout"],
                 )
             else:
                 spec = expert_encoders_spec["emb_encoder"]
@@ -66,8 +67,12 @@ class MolJEPA(nn.Module):
                     dropout=spec["dropout"],
                 )
 
+        
         hidden_dim = moe_encoder_spec["hidden_dim"]
-        self.attn_query = nn.Linear(hidden_dim, 1)
+
+        self.pooling_strategy = moe_encoder_spec.get("pooling_strategy")
+        if self.pooling_strategy == "softmax_attention":
+            self.attn_query = nn.Linear(hidden_dim, 1)
 
         self.use_prediction_head = moe_encoder_spec.get("use_prediction_head", False)
         if self.use_prediction_head:
@@ -105,7 +110,7 @@ class MolJEPA(nn.Module):
                     self.moe_encoder_spec["hidden_dim"], label_spec["dim"]
                 )
         else:
-            print("WARN: Label strategy not yet implemented.")
+            print("WARN: Label strategy not yet implemented. Ignoring labels... ")
 
     def pooling(self, x, batch):
         pass
@@ -159,10 +164,11 @@ class MolJEPA(nn.Module):
         for col_i, emb in embeddings:
             full[mask[:, col_i] & active_mask[:, col_i], col_i] = emb
 
-        # scores = self.attn_query(full).squeeze(-1).masked_fill(~mask, float("-inf"))
-        # combined = (torch.softmax(scores, dim=1).unsqueeze(-1) * full).sum(dim=1)
-        # TODO: Simple pooling
-        combined = full.sum(dim=1)
+        if self.pooling_strategy == "softmax_attention":
+            scores = self.attn_query(full).squeeze(-1).masked_fill(~mask, float("-inf"))
+            combined = (torch.softmax(scores, dim=1).unsqueeze(-1) * full).sum(dim=1)
+        elif self.pooling_strategy == "mean":
+            combined = full.sum(dim=1) / mask.sum(dim=1, keepdim=True).clamp(min=1)    
         return combined
 
 
