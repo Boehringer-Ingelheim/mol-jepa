@@ -34,14 +34,16 @@ class GraphEncoder(nn.Module):
 
         self.dropout = dropout
 
+        # Project input to hidden_dim so residual connections work at every layer
+        self.input_proj = nn.Linear(node_dim, hidden_dim) if node_dim != hidden_dim else nn.Identity()
+
         self.convs = nn.ModuleList()
         self.norms = nn.ModuleList()
 
-        in_dim = node_dim
         for _ in range(layers):
             if layer_type == "TransformerConv":
                 conv = TransformerConv(
-                    in_dim,
+                    hidden_dim,
                     hidden_dim,
                     edge_dim=edge_dim,
                     heads=attn_heads,
@@ -52,19 +54,21 @@ class GraphEncoder(nn.Module):
 
             self.convs.append(conv)
             self.norms.append(nn.LayerNorm(hidden_dim))
-            in_dim = hidden_dim
 
         self.proj = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x, edge_index, edge_attr, batch):
+        x = self.input_proj(x)
+
         for conv, norm in zip(self.convs, self.norms):
+            residual = x
             x = conv(x, edge_index, edge_attr)
             x = self.act(x)
 
             if self.dropout > 0:
                 x = F.dropout(x, p=self.dropout, training=self.training)
 
-            x = norm(x)
+            x = norm(x + residual)
 
         x = self.pool(x, batch)
         return self.proj(x)

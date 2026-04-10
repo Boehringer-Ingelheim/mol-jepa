@@ -4,11 +4,13 @@ from dataclasses import dataclass
 from typing import Any, Optional, Union, Iterable
 
 import torch
+import logging
 from lightning.pytorch import Callback, LightningModule, Trainer
 
 import matplotlib.pyplot as plt
-import seaborn as sns
+import numpy as np
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class UMAPConfig:
@@ -245,6 +247,12 @@ class UMAPEmbeddingLogger(Callback):
         with torch.no_grad():
             emb_np = emb.numpy()
             lab_np = lab.numpy()
+
+        if np.isnan(emb_np).all():
+            logging.warning(
+                f"{self.name}: All embeddings are NaN, skipping UMAP for epoch {epoch}."
+            )
+            return
 
         coords = reducer.fit_transform(emb_np)
 

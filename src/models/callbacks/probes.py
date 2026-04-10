@@ -22,10 +22,10 @@ def extract_labels(benchmark_labels):
     return column_names, extended_labels
 
 
-def build_probe(module):
-    input_dim = module.model.moe_encoder_spec["hidden_dim"]
-    hidden_dim = module.model.moe_encoder_spec["hidden_dim"]
-    output_dim = 1
+def build_probe(cfg):
+    input_dim = cfg.module.probes.input_dim
+    output_dim = cfg.module.probes.output_dim
+    hidden_dim = cfg.module.probes.hidden_dim
     return nn.Sequential(
         nn.Linear(input_dim, hidden_dim),
         nn.BatchNorm1d(hidden_dim),
@@ -46,13 +46,12 @@ def build_online_probes(cfg, module):
                     name=f"probe_{label}",
                     input="embedding_1",
                     target=label,
-                    probe=build_probe(module),
+                    probe=build_probe(cfg),
                     loss=masked_mae_loss,
                     metrics={
                         "mae": MaskedMAE(),
                     },
                     optimizer={"type": "AdamW", "lr": 1e-3, "weight_decay": 1e-4},
-                    scheduler={"type": "CosineAnnealingLR", "T_max": 1000},
                 )
             )
         elif "classification" in label:

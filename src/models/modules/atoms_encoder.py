@@ -32,12 +32,16 @@ class AtomsEncoder(nn.Module):
         self.norms1 = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(layers)])
         self.norms2 = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(layers)])
 
+        self.drop = nn.Dropout(dropout)
+
         # Lightweight feed-forward network
         self.ffns = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(hidden_dim, 4 * hidden_dim),
                 nn.GELU(),
+                nn.Dropout(dropout),
                 nn.Linear(4 * hidden_dim, hidden_dim),
+                nn.Dropout(dropout),
             )
             for _ in range(layers)
         ])
@@ -59,7 +63,7 @@ class AtomsEncoder(nn.Module):
             self.self_attn_layers, self.norms1, self.norms2, self.ffns
         ):
             attn_out, _ = attn(x_dense, x_dense, x_dense, key_padding_mask=~mask)
-            x_dense = norm1(x_dense + attn_out)
+            x_dense = norm1(x_dense + self.drop(attn_out))
             x_dense = norm2(x_dense + ffn(x_dense))
 
         x_flat = x_dense[mask]

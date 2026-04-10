@@ -1,10 +1,11 @@
 seed: 42
 trainer:
   _target_: lightning.Trainer
-  max_epochs: 1
+  max_epochs: 1000
   accelerator: gpu
   devices: 1
   precision: 32
+  gradient_clip_val: 1.0
   num_sanity_val_steps: 0
   enable_checkpointing: false
   logger:
@@ -15,31 +16,33 @@ trainer:
 module:
   optimizer:
     lr: 0.001
-    weight_decay: 0.0001
+    weight_decay: 0.001
   modalities: ${data.modalities}
   labels: ${data.labels}
   label_strategy: ${data.label_strategy}
   moe_encoder:
-    hidden_dim: 128
+    hidden_dim: 32
     masking_strategy: ratio_first_pass
-    masking_ratio: 0.1
-    lambda: 0.7
+    masking_ratio: 0.3
+    lambda: 0.1
     use_prediction_head: false
     use_loss_projection: false
+    weighted_loss: true
+    weights: ${data.weights}
     pooling_strategy: mean
-    dropout: 0.4
+    dropout: 0.1
   expert_encoders:
     graph_encoder:
-      layers: 3
+      layers: 1
       layer_type: TransformerConv
       hidden_dim: ${module.moe_encoder.hidden_dim}
       output_dim: ${module.moe_encoder.hidden_dim}
       activation: gelu
       dropout: ${module.moe_encoder.dropout}
-      attn_heads: 8
+      attn_heads: 2
       pooling: mean
     emb_encoder:
-      layers: 3
+      layers: 1
       hidden_dim: ${module.moe_encoder.hidden_dim}
       output_dim: ${module.moe_encoder.hidden_dim}
       activation: gelu
@@ -50,10 +53,14 @@ module:
       output_dim: ${module.moe_encoder.hidden_dim}
       attn_heads: 2
       dropout: ${module.moe_encoder.dropout}
+  probes:
+    input_dim: ${module.moe_encoder.hidden_dim}
+    hidden_dim: 128
+    output_dim: 1
 data:
-  filename: merged_data_deduplicated_with_benchmarks_n=800.csv
+  filename: merged_data_deduplicated_with_benchmarks_n=56k.csv
   num_workers: 128
-  batch_size: 64
+  batch_size: 32
   drop_last: true
   shuffle: false
   recreate: false
@@ -62,6 +69,25 @@ data:
     - dataset
     - chembl_id
     - provided_split
+  weights:
+    - name: chembl_targets
+      weight: 188.5
+    - name: tdc_targets
+      weight: 182.81
+    - name: pcba_targets
+      weight: 152.01
+    - name: nabla_targets
+      weight: 145.79
+    - name: moe
+      weight: 1.05
+    - name: boltz
+      weight: 198.72
+    - name: uma
+      weight: 150.69
+    - name: chemgpt
+      weight: 1.0
+    - name: graph
+      weight: 1.0
   modalities:
   - name: chemgpt
     input: smiles
@@ -112,30 +138,30 @@ data:
   - name: nabla_targets
     colname: nabla_targets_path
     dim: 17
-  label_strategy: none # modality, label
+  label_strategy: modality # modality, label
   benchmark_labels:
     asap_potency: 
       type: regression
       labels:
-      - pIC50 (MERS-CoV Mpro) # log IC50, Target MAE: < 0.5
-      - pIC50 (SARS-CoV-2 Mpro) # log IC50, Target MAE: < 0.5
+      - pIC50 (MERS-CoV Mpro) 
+      - pIC50 (SARS-CoV-2 Mpro)
     asap_admet:
       type: regression
       labels:
-      - HLM # Human liver microsome intrinsic clearance, Target MAE: < 0.5
-      - KSOL # Kinetic solubility, log10 g/L, Target MAE: < 0.5
-      - LogD # Octanol-water partition coefficient, Target MAE: < 0.5
-      - MDR1-MDCKII # P-glycoprotein substrate, Target MAE: < 0.5
-      - MLM # Microsomal stability, Target MAE: < 0.5
-    # biogen_adme:
-    #   type: regression
-    #   labels:
-    #   - hlm_clint
-    #   - mdr1_mdck_er
-    #   - plasma_protein_binding_human
-    #   - plasma_protein_binding_rat
-    #   - rlm_clint
-    #   - solubility_ph_6_8
+      - log_HLM 
+      - log_KSOL
+      - LogD 
+      - log_MDR1-MDCKII 
+      - log_MLM 
+    biogen_adme:
+      type: regression
+      labels:
+      - hlm_clint
+      - mdr1_mdck_er
+      - plasma_protein_binding_human
+      - plasma_protein_binding_rat
+      - rlm_clint
+      - solubility_ph_6_8
     # tox21_linz:
     #   type: classification
     #   labels:
@@ -154,15 +180,15 @@ data:
     expansionrx:
       type: regression
       labels:
-      - Caco-2 Permeability Efflux
-      - Caco-2 Permeability Papp A
-      - HLM CLint
-      - KSOL
+      - log_Caco-2 Permeability Efflux
+      - log_Caco-2 Permeability Papp A
+      - log_HLM CLint
+      - log_KSOL
       - LogD
-      - MBPB
-      - MGMB
-      - MLM CLint
-      - MPPB
+      - log_MBPB
+      - log_MGMB
+      - log_MLM CLint
+      - log_MPPB
 hydra:
   run:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}

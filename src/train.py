@@ -1,4 +1,5 @@
 import hydra
+import numpy as np
 import logging
 import lightning as pl
 from omegaconf import DictConfig
@@ -18,6 +19,7 @@ from models.callbacks.cosine import CosineSimilarity
 from models.callbacks.earlystop import EarlyStopping
 from models.callbacks.gradnorm import GradientNormLogger
 from models.callbacks.umap import UMAPEmbeddingLogger
+from models.callbacks.hp_metric import StoreHPMetricCallback
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,7 +78,19 @@ def main(cfg: DictConfig):
             mode="batch",
         ),
         GradientNormLogger(norm_type=2, log_on_step=True),
-        EarlyStopping(metric_name="validate_loss", patience=200, mode="min"),
+        EarlyStopping(
+            metric_name="validate_loss"
+            if not cfg.module.moe_encoder.weighted_loss
+            else "validate_weighted_loss",
+            patience=10,
+            mode="min",
+        ),
+        # Another early stopping based on probe
+        EarlyStopping(
+            metric_name="eval/probe_expansionrx_regression_LogD_mae",
+            patience=10,
+            mode="min",
+        ),
         UMAPEmbeddingLogger(
             name="umap_KSOL",
             embedding_key="embedding_1",
@@ -99,16 +113,23 @@ def main(cfg: DictConfig):
             max_points=300,
             gather_distributed=True,
         ),
+        StoreHPMetricCallback(metric_name="eval/probe_expansionrx_regression_LogD_mae"),
     ]
     logger.info("Added callbacks...")
 
     manager = spt.Manager(trainer=trainer, module=module, data=data, seed=cfg.seed)
+
     # Start training
     manager()
 
     # Return for HP search
-    best_loss = trainer.callback_metrics["eval/probe_expansionrx_regression_LogD_mae"]
-    return best_loss.item() if best_loss is not None else None
+    if hasattr(module, "hp_metric"):
+        result = module.hp_metric.item()
+        if np.isnan(result):
+            logger.warning("HP Metric is NaN, returning inf for optimization.")
+            result = float("inf")
+        logger.info(f"HP Metric: {result}")
+        return result
 
 
 if __name__ == "__main__":

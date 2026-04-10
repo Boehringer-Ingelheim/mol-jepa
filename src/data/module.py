@@ -134,7 +134,7 @@ def build_dataloaders(cfg):
     val_loader = DataLoader(
         val_dataset,
         batch_size=cfg.data.batch_size,
-        shuffle=cfg.data.shuffle,
+        shuffle=False,
         follow_batch=follow_batch,
         num_workers=cfg.data.num_workers,
         pin_memory=False,

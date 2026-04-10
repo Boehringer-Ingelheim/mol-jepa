@@ -1,4 +1,5 @@
 import torch
+import logging
 import torch.nn as nn
 from torch.nn import functional as F
 from typing import Union, Dict
@@ -20,12 +21,15 @@ class MolJEPA(nn.Module):
         expert_encoders_spec: dict,
     ):
         super().__init__()
-
+        self.logger = logging.getLogger(__name__)
         self.modalities_spec = modalities_spec
         self.labels_spec = labels_spec
         self.label_strategy = label_strategy
         self.moe_encoder_spec = moe_encoder_spec
         self.expert_encoders_spec = expert_encoders_spec
+        self.weighted_loss = moe_encoder_spec.get("weighted_loss", False)
+        if self.weighted_loss:
+            self.weight_map = {w["name"]: w["weight"]  for w in moe_encoder_spec["weights"]}
         self.apply_label_strategy()
         self.modalities_dict = {mod["name"]: mod for mod in self.modalities_spec}
         self.sigreg = SlicedEppsPulley(num_slices=1024, t_max=3.0, n_points=17)
@@ -66,10 +70,8 @@ class MolJEPA(nn.Module):
                     output_dim=spec["output_dim"],
                     dropout=spec["dropout"],
                 )
-
         
         hidden_dim = moe_encoder_spec["hidden_dim"]
-
         self.pooling_strategy = moe_encoder_spec.get("pooling_strategy")
         if self.pooling_strategy == "softmax_attention":
             self.attn_query = nn.Linear(hidden_dim, 1)
@@ -110,7 +112,7 @@ class MolJEPA(nn.Module):
                     self.moe_encoder_spec["hidden_dim"], label_spec["dim"]
                 )
         else:
-            print("WARN: Label strategy not yet implemented. Ignoring labels... ")
+            self.logger.warning("Label strategy not yet implemented. Ignoring labels... ")
 
     def pooling(self, x, batch):
         pass
@@ -192,22 +194,17 @@ def ssl_forward(self, batch: Dict, stage: str):
     active_modalities = [
         batch[k][1:] - batch[k][:-1]
         if k is not None
-        else torch.zeros(len(batch), device=device)
+        else torch.zeros(batch.num_graphs, device=device)
         for k in modalities
     ]
     active_mask = (torch.stack(active_modalities) > 0).t()
 
-    if stage == "fit":
-        # Create masks for 2 passes
-        pass_1_mask, pass_2_mask = sample_masks(
-            active_mask,
-            model_cfg["moe_encoder"]["masking_strategy"],
-            ratio=model_cfg["moe_encoder"]["masking_ratio"],
-        )
-    else:
-        # Use all modalities for validation and testing
-        pass_1_mask = active_mask
-        pass_2_mask = active_mask
+    # Create masks for 2 passes
+    pass_1_mask, pass_2_mask = sample_masks(
+        active_mask,
+        model_cfg["moe_encoder"]["masking_strategy"],
+        ratio=model_cfg["moe_encoder"]["masking_ratio"],
+    )
 
     # Use the other pass mask as features
     embedding_1 = self.model(batch, modalities, pass_1_mask, active_mask)
@@ -229,11 +226,29 @@ def ssl_forward(self, batch: Dict, stage: str):
     else:
         z1, z2 = embedding_1, embedding_2
 
+    # Modality weights
+    if self.model.weighted_loss:
+        modality_weights = [
+            self.model.weight_map[m.replace("_x_ptr", "")] if m else 0.0
+            for m in modalities
+        ]
+        modality_weights = torch.tensor(modality_weights, device=z1.device)
+        stacked_weights = modality_weights.unsqueeze(0).repeat(z1.size(0), 1)
+        masked_weights = stacked_weights * pass_1_mask.float()
+        weights = masked_weights.sum(dim=1) / pass_1_mask.sum(dim=1).clamp(min=1)
+
+        # We might have to use a different masking strategy if we mask both sides!
+        if self.model.masking_strategy != "ratio_first_pass":
+            raise NotImplementedError("Weighted loss currently only implemented for ratio_first_pass masking strategy.")
+    else:
+        weights = None
+
     loss, l2_loss, sigreg_loss = compute_loss(
         self.model,
         z1,
         z2,
         lamb=model_cfg["moe_encoder"]["lambda"],
+        weights=weights
     )
 
     # Label loss
@@ -245,7 +260,7 @@ def ssl_forward(self, batch: Dict, stage: str):
             target = batch[label_name + "_x"]
             # Nan mask
             mask = ~torch.isnan(target)
-            # TODO: Track batch to make this work
+            raise NotImplementedError("This requires batch tracing.")
             if mask.sum() > 0:
                 label_loss = F.mse_loss(pred[mask], target[mask])
                 loss += label_loss
@@ -265,9 +280,12 @@ def ssl_forward(self, batch: Dict, stage: str):
 
 
 def compute_loss(
-    self, embedding_1: torch.Tensor, embedding_2: torch.Tensor, lamb: float = 0.01
-):
-    l2_loss = F.pairwise_distance(embedding_1, embedding_2, p=2).mean()
+    self, embedding_1: torch.Tensor, embedding_2: torch.Tensor, lamb: float = 0.01, weights: torch.Tensor = None
+):  
+    if weights is not None:
+        l2_loss = (((embedding_1 - embedding_2)**2) * weights.unsqueeze(1)).mean()
+    else:
+        l2_loss = (((embedding_1 - embedding_2)**2)).mean()
     sigreg_loss = self.sigreg(embedding_1) + self.sigreg(embedding_2)
     loss = l2_loss + lamb * sigreg_loss
     return loss, l2_loss, sigreg_loss
@@ -335,6 +353,9 @@ def extract_benchmark_labels(batch):
 
 
 def log_metrics(self, out_dict, stage):
+    # Add flag when its weighted loss
+    if self.model.weighted_loss:
+        stage = f"{stage}_weighted"
     self.log(
         f"{stage}_loss",
         out_dict["loss"],
@@ -359,3 +380,6 @@ def log_metrics(self, out_dict, stage):
         prog_bar=True,
         batch_size=out_dict["batch_size"],
     )
+
+    if hasattr(self, "hp_metric"):
+        self.log("hp_metric", self.hp_metric, on_step=False, on_epoch=True, prog_bar=False)

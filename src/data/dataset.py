@@ -463,6 +463,9 @@ class MultimodalData(Data):
         embedding = embedding.flatten() if embedding.dim() > 1 else embedding
         embedding = embedding.unsqueeze(0) if embedding.dim() == 1 else embedding
         embedding = embedding.float()
+
+        # Zero Imputation - this is mostly for when using target vectors as modalities
+        embedding = torch.nan_to_num(embedding, nan=0.0)
         setattr(self, f"{encoder_name}_x", embedding)
 
     def add_atom_embedding(self, encoder_name: str, x: torch.Tensor):

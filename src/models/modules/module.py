@@ -1,6 +1,3 @@
-import torch
-from uri_template import partial
-
 import stable_pretraining as spt
 from omegaconf import OmegaConf
 
