@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import logging
 import pandas as pd
@@ -16,7 +17,15 @@ from dotenv import load_dotenv
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from models.backbones.base import MoleculeEncoder
-from models.callbacks.probes import extract_labels
+from callbacks.probes import extract_labels
+from data.parallel import _worker_initializer, _process_row_worker_fn
+from data.memmaps import (
+    setup_memmaps,
+    open_memmaps,
+    open_ragged_memmaps,
+)
+from data.utils import barrier, is_rank_zero
+
 
 RDLogger.DisableLog("rdApp.warning")
 
@@ -37,6 +46,7 @@ class MoleculeDataset(Dataset):
         recreate=False,
         processed_file=None,
         num_workers=8,
+        use_memmap=False,
     ):
         load_dotenv()
         for var in ["DATA_DIR", "PROCESSED_DATA_DIR"]:
@@ -52,7 +62,7 @@ class MoleculeDataset(Dataset):
         self.metadata_cols = metadata_cols
         self.filename = filename
         self.filename_unique = f"f={filename.split('.')[0]}_enc={'_'.join(self.modalities_spec.keys()).replace('targets', 't_')}"
-        self.tensor_data_dir = self._processed_dir / f"tensors_{self.filename_unique}"
+        self.tensor_data_dir = self._processed_dir / f"tensors_{filename.split('.')[0]}"
         self.processed_file_dir = "parquets"
         self.processed_file = (
             f"data_table_{self.filename_unique}.parquet"
@@ -61,6 +71,8 @@ class MoleculeDataset(Dataset):
         )
         self.data_table = None
         self.num_workers = num_workers
+        self.use_memmap = use_memmap
+        self.memmap_dir = self._processed_dir / "memmaps"
         self.logger = logging.getLogger(__name__)
         self.follow_batch = []
         self.include_keys = []
@@ -82,15 +94,88 @@ class MoleculeDataset(Dataset):
         os.makedirs(self._processed_dir, exist_ok=True)
         os.makedirs(self.tensor_data_dir, exist_ok=True)
         os.makedirs(self.root_dir / self.processed_file_dir, exist_ok=True)
+        os.makedirs(self.memmap_dir, exist_ok=True)
         super().__init__(self.root_dir, transform=None, pre_transform=None)
-        self.init_include_and_follow_keys()
 
+        self.init_include_and_follow_keys()
         self.logger.info(
             f"Loading processed data: {self.root_dir / self.processed_file_dir / self.processed_file}"
         )
         self.data_table = pd.read_parquet(
             self.root_dir / self.processed_file_dir / self.processed_file
+        ).reset_index(drop=True)
+
+        self.memmaps = None
+        self.ragged_memmaps = None
+        if self.use_memmap:
+            parquet_path = (
+                self.root_dir
+                / self.processed_file_dir
+                / f"data_table_{self.filename_unique}.parquet"
+            )
+            source_parquet = (
+                parquet_path if parquet_path.is_file() else self.processed_file_names[0]
+            )
+            setup_memmaps(
+                self.modalities_spec,
+                self.memmap_dir,
+                self.logger,
+                source_parquet,
+                self.filename,
+            )
+
+        self.build_numpy_caches()
+        self.cache = {}
+
+    def _lazy_init_memmaps(self):
+        """Safely opens unique file handles for whichever process calls it."""
+        if self.use_memmap:
+            # These functions will now target the local process space natively
+            self.memmaps = open_memmaps(self.memmap_dir, self.filename, self.logger)
+            self.ragged_memmaps = open_ragged_memmaps(
+                self.memmap_dir, self.filename, self.logger
+            )
+        else:
+            self.memmaps = {}
+            self.ragged_memmaps = {}
+
+    def build_numpy_caches(self):
+        """Caching of data table as numpy arrays for faster access"""
+        df = self.data_table
+
+        # Metadata columns
+        self._meta_arrays = {
+            c: df[c].to_numpy() for c in (self.metadata_cols or []) if c in df.columns
+        }
+
+        # Benchmark labels
+        column_names, extended_labels = extract_labels(self.benchmark_labels_spec)
+        self._benchmark_arrays = [
+            (label, df[col].to_numpy())
+            for col, label in zip(column_names, extended_labels)
+            if col in df.columns
+        ]
+
+        # Per-modality path columns (avoid f-string on every call)
+        self._path_arrays = {}
+        for encoder_name in self.modalities_spec.keys():
+            col = f"{encoder_name}_tensors_path"
+            if col in df.columns:
+                self._path_arrays[encoder_name] = df[col].to_numpy()
+
+        # raw_index mapping for split datasets
+        self._has_raw_index = "raw_index" in df.columns
+        self._raw_index_arr = (
+            df["raw_index"].to_numpy() if self._has_raw_index else None
         )
+
+        # Non-modality label paths
+        self._label_arrays = {}
+        if self.label_strategy != "modality":
+            for label_name, spec in self.labels_spec.items():
+                col = spec["colname"]
+                if col in df.columns:
+                    self._label_arrays[label_name] = df[col].to_numpy()
 
     def apply_label_strategy(self):
         if self.label_strategy == "modality":
@@ -99,7 +184,7 @@ class MoleculeDataset(Dataset):
                     "input": "precomputed",
                     "output": "embedding",
                     "colname": self.labels_spec[label_name]["colname"],
-                    # Labels are assumed to be precomputed vectors
+                    "dim": self.labels_spec[label_name].get("dim"),
                     "processing": "multiprocess",
                 }
 
@@ -145,6 +230,10 @@ class MoleculeDataset(Dataset):
                 self.include_keys.append(f"{encoder_name}_edge_index")
                 self.include_keys.append(f"{encoder_name}_edge_attr")
                 self.follow_batch.append(f"{encoder_name}_x")
+        if self.label_strategy == "label":
+            for label_name in self.labels_spec.keys():
+                self.include_keys.append(f"{label_name}_x")
+                self.follow_batch.append(f"{label_name}_x")
 
     @property
     def raw_file_names(self):
@@ -211,10 +300,14 @@ class MoleculeDataset(Dataset):
 
                 atoms_list = atomicdata_list_to_batch(atoms_list)
                 batch_data = encoder.encode_batch(atoms_list)
-                data = [
-                    batch_data[i] if i not in filtered_indices else None
-                    for i in range(len(query_data))
-                ]
+                data = []
+                j = 0
+                for i in range(len(query_data)):
+                    if i in filtered_indices:
+                        data.append(None)
+                    else:
+                        data.append(batch_data[j])
+                        j += 1
             else:
                 if pd.isna(query_data["conformer_path"]):
                     return None
@@ -247,14 +340,18 @@ class MoleculeDataset(Dataset):
 
         results = {}
         for encoder_name, spec in modalities_spec.items():
+            save_path = str(self.tensor_data_dir / f"{encoder_name}_data_{index}.pt")
+
+            # Check if data already exists as file
+            if os.path.isfile(save_path):
+                results[encoder_name] = save_path
+                continue
+
             data = self._get_encoder_results(
                 encoders[encoder_name], spec, row, self.root_dir
             )
 
             if data is not None:
-                save_path = str(
-                    self.tensor_data_dir / f"{encoder_name}_data_{index}.pt"
-                )
                 data = (
                     torch.as_tensor(np.array(data, dtype=np.float32))
                     if isinstance(data, np.ndarray)
@@ -283,40 +380,79 @@ class MoleculeDataset(Dataset):
         rows = [(index, row) for index, row in dataset.iterrows()]
         worker_state = self.get_encoders_state(processing_subset="multiprocess")
 
+        # Pass arguments
+        modalities_spec = worker_state["modalities_spec"]
+        tensor_data_dir = str(self.tensor_data_dir)
+        root_dir = str(self.root_dir)
+
         pbar = tqdm(
             total=dataset.shape[0], dynamic_ncols=True, desc="Processing dataset"
         )
         ctx = mp.get_context("spawn")
-        executor = ProcessPoolExecutor(max_workers=self.num_workers, mp_context=ctx)
+        executor = ProcessPoolExecutor(
+            max_workers=self.num_workers,
+            mp_context=ctx,
+            initializer=_worker_initializer,
+            initargs=(modalities_spec,),
+        )
 
         with pbar, executor:
-            futures = {
-                executor.submit(
-                    self._process_row_worker, worker_state, index, row
-                ): index
-                for index, row in rows
-            }
-
+            futures = {}
             failed_indices = []
-            for future in as_completed(futures):
-                try:
-                    index, results = future.result()
-                    for encoder_name, save_path in results.items():
-                        dataset.at[index, f"{encoder_name}_tensors_path"] = save_path
-                except Exception as e:
-                    pbar.write(f"Index {futures[future]}: {e}")
-                    traceback.print_exc()
 
-                    failed_indices.append(futures[future])
-                finally:
-                    pbar.update(1)
-                    pbar.set_postfix({"failed": len(failed_indices)})
+            # Submit in chunks
+            chunk_size = self.num_workers * 4
+            for chunk_start in range(0, len(rows), chunk_size):
+                chunk = rows[chunk_start : chunk_start + chunk_size]
+                for index, row in chunk:
+                    future = executor.submit(
+                        _process_row_worker_fn,
+                        tensor_data_dir,
+                        root_dir,
+                        index,
+                        row,
+                    )
+                    futures[future] = index
+
+                # Collect results for this chunk
+                for future in as_completed(futures):
+                    try:
+                        index, results = future.result()
+                        for encoder_name, save_path in results.items():
+                            dataset.at[index, f"{encoder_name}_tensors_path"] = (
+                                save_path
+                            )
+                    except Exception as e:
+                        pbar.write(f"Index {futures[future]}: {e}")
+                        traceback.print_exc()
+                        failed_indices.append(futures[future])
+                    finally:
+                        pbar.update(1)
+                        pbar.set_postfix({"failed": len(failed_indices)})
+                futures.clear()
 
     def process(self):
+        parquet_exists = False
         if self.processed_file_names[0].is_file():
+            try:
+                pd.read_parquet(self.processed_file_names[0], columns=[])
+                parquet_exists = True
+            except Exception:
+                self.logger.warning(
+                    f"Processed file at {self.processed_file_names[0]} is corrupted. Deleting and re-processing..."
+                )
+                self.processed_file_names[0].unlink()
+
+        # If parquet exists, only check if memmaps are needed
+        if parquet_exists:
             self.logger.info(
                 f"Processed file already exists at {self.processed_file_names[0]}, skipping processing."
             )
+            return
+
+        if not is_rank_zero():
+            self.logger.info("Waiting for rank 0 to finish dataset processing...")
+            barrier(self.processed_file_names)
             return
 
         dataset = pd.read_csv(self.root_dir / self.filename)
@@ -346,6 +482,21 @@ class MoleculeDataset(Dataset):
                 indices = [idx for idx, _ in batch]
                 batch_rows = [row for _, row in batch]
                 try:
+                    # Check if all data in batch already exists as files
+                    all_exist = True
+                    for index in indices:
+                        save_path = (
+                            self.tensor_data_dir / f"{encoder_name}_data_{index}.pt"
+                        )
+                        if not os.path.isfile(save_path):
+                            all_exist = False
+                            break
+                        dataset.at[index, f"{encoder_name}_tensors_path"] = str(
+                            save_path
+                        )
+                    if all_exist:
+                        continue
+
                     batch_data = self._get_encoder_results(
                         encoder, spec, batch_rows, self.root_dir, batch=True
                     )
@@ -388,46 +539,86 @@ class MoleculeDataset(Dataset):
                             self.logger.error(f"Index {index}: {e}")
                             traceback.print_exc()
 
-        dataset.to_parquet(self.processed_file_names[0])
+        final = self.processed_file_names[0]
+        tmp = final.with_suffix(final.suffix + ".tmp")
+        dataset.to_parquet(tmp)
+        os.replace(tmp, final)
+        barrier(self.processed_file_names)
 
     def len(self):
         return self.data_table.shape[0]
 
     def get(self, idx):
+        if idx in self.cache:
+            return self.cache[idx]
+
+        if self.memmaps is None:
+            self._lazy_init_memmaps()
+
         data = MultimodalData()
 
-        # Add metadata
-        metadata = {col: self.data_table.loc[idx, col] for col in self.metadata_cols}
-        data.add_metadata(metadata)
+        # Load data from numpy cache (Zero-copy views)
+        data.add_metadata({c: arr[idx] for c, arr in self._meta_arrays.items()})
+        data.add_metadata({label: arr[idx] for label, arr in self._benchmark_arrays})
 
-        # Add benchmark labels
-        column_names, extended_labels = extract_labels(self.benchmark_labels_spec)
-        benchmark_metadata = {
-            label: self.data_table.loc[idx, col]
-            for col, label in zip(column_names, extended_labels)
-        }
-        data.add_metadata(benchmark_metadata)
+        # Get per-encoder data from memmaps
+        memmap_idx = int(self._raw_index_arr[idx]) if self._has_raw_index else idx
 
-        # Get per-encoder data
         for encoder_name, spec in self.modalities_spec.items():
-            data_path = self.data_table.loc[idx, f"{encoder_name}_tensors_path"]
+            # --- Add ragged data ---
+            if encoder_name in self.ragged_memmaps:
+                pm = self.ragged_memmaps[encoder_name]
+                lo = int(pm["node_off"][memmap_idx])
+                hi = int(pm["node_off"][memmap_idx + 1])
+                if hi <= lo:
+                    continue
 
-            if data_path is None:
+                x = torch.from_numpy(pm["x"][lo:hi]).clone()
+
+                if pm["output"] == "atoms":
+                    data.add_atom_embedding(encoder_name, x=x)
+                elif pm["output"] == "graph":
+                    elo = int(pm["edge_off"][memmap_idx])
+                    ehi = int(pm["edge_off"][memmap_idx + 1])
+                    if ehi > elo:
+                        # Slicing dim 1 makes 2D arrays non-contiguous.
+                        # If PyTorch throws an error, use .clone() on the torch tensor instead.
+                        ei = torch.from_numpy(pm["ei"][:, elo:ehi]).clone()
+                        ea = torch.from_numpy(pm["ea"][elo:ehi])
+                    else:
+                        ei = torch.empty((2, 0), dtype=torch.long)
+                        ea = torch.empty((0, pm["ea"].shape[1]), dtype=torch.float32)
+                    data.add_graph(encoder_name, x=x, edge_index=ei, edge_attr=ea)
                 continue
 
-            encoder_data = torch.load(data_path, weights_only=False)
+            # Load regular memmap data
+            if encoder_name in self.memmaps:
+                assert True
+                emb = torch.from_numpy(self.memmaps[encoder_name][memmap_idx]).clone()
+                data.add_mol_embedding(encoder_name, emb)
+                continue
 
-            # Global embedding
+            path_arr = self._path_arrays.get(encoder_name)
+            if path_arr is None:
+                continue
+            data_path = path_arr[idx]
+            if pd.isna(data_path):
+                continue
+
+            try:
+                encoder_data = torch.load(
+                    data_path, weights_only=True, map_location="cpu"
+                )
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to load data for encoder '{encoder_name}' at index {idx}: {e}"
+                )
+                continue
+
             if spec["output"] == "embedding":
                 data.add_mol_embedding(encoder_name, encoder_data)
-
-            # Per node embedding
             elif spec["output"] == "atoms":
-                data.add_atom_embedding(
-                    encoder_name,
-                    x=encoder_data,
-                )
-            # Per node embedding + edge features
+                data.add_atom_embedding(encoder_name, x=encoder_data)
             elif spec["output"] == "graph":
                 data.add_graph(
                     encoder_name,
@@ -436,16 +627,15 @@ class MoleculeDataset(Dataset):
                     edge_attr=encoder_data["edge_attr"],
                 )
 
-        # Add labels as metadata
-        for label_name in self.labels_spec.keys():
-            colname = self.labels_spec[label_name]["colname"]
-            labels_path = self.data_table.loc[idx, colname]
-            if not pd.isna(labels_path):
-                labels = np.load(labels_path)
-                data.add_mol_embedding(
-                    label_name, torch.tensor(labels, dtype=torch.float32)
-                )
+        # for label_name, arr in self._label_arrays.items():
+        #     labels_path = arr[idx]
+        #     if pd.isna(labels_path):
+        #         continue
+        #     labels = np.load(labels_path)  # Direct file system read bottleneck
+        #     data.add_mol_embedding(label_name, torch.from_numpy(labels).float())
 
+        # Save in cache
+        self.cache[idx] = data
         return data
 
 

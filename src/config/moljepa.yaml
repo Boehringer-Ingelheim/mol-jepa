@@ -3,11 +3,13 @@ trainer:
   _target_: lightning.Trainer
   max_epochs: 1000
   accelerator: gpu
-  devices: 1
+  strategy: ddp_find_unused_parameters_true
+  devices: 4
+  num_nodes: 2
   precision: 32
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
-  enable_checkpointing: false
+  enable_checkpointing: true
   logger:
     _target_: lightning.pytorch.loggers.TensorBoardLogger
     name: mol-jepa
@@ -15,52 +17,71 @@ trainer:
 
 module:
   optimizer:
-    lr: 0.001
-    weight_decay: 0.001
+    lr: 0.0005
+    weight_decay: 0.01
   modalities: ${data.modalities}
   labels: ${data.labels}
   label_strategy: ${data.label_strategy}
   moe_encoder:
-    hidden_dim: 32
-    masking_strategy: ratio_first_pass
+    hidden_dim: 512 
+    attn_heads: 4
+    attn_layers: 2
     masking_ratio: 0.3
-    lambda: 0.1
-    use_prediction_head: false
-    use_loss_projection: false
-    weighted_loss: true
+    lambda: 0.7
+    weighted_loss: false
     weights: ${data.weights}
-    pooling_strategy: mean
+    pooling: softmax_attention
+    mask_conditioned_attention: false
     dropout: 0.1
   expert_encoders:
     graph_encoder:
-      layers: 1
+      layers: 3
       layer_type: TransformerConv
       hidden_dim: ${module.moe_encoder.hidden_dim}
       output_dim: ${module.moe_encoder.hidden_dim}
       activation: gelu
       dropout: ${module.moe_encoder.dropout}
-      attn_heads: 2
-      pooling: mean
+      attn_heads: 8
+      pooling: max
     emb_encoder:
-      layers: 1
+      layers: 3
       hidden_dim: ${module.moe_encoder.hidden_dim}
       output_dim: ${module.moe_encoder.hidden_dim}
       activation: gelu
       dropout: ${module.moe_encoder.dropout}
     atom_encoder:
-      layers: 2
+      layers: 1
       hidden_dim: ${module.moe_encoder.hidden_dim}
       output_dim: ${module.moe_encoder.hidden_dim}
-      attn_heads: 2
+      attn_heads: 4
       dropout: ${module.moe_encoder.dropout}
   probes:
-    input_dim: ${module.moe_encoder.hidden_dim}
-    hidden_dim: 128
-    output_dim: 1
+    - name: linear
+      input_dim: ${module.moe_encoder.hidden_dim}
+      variant: linear
+      output_dim: 1
+      multimodal: false
+    - name: nonlinear
+      input_dim: ${module.moe_encoder.hidden_dim}
+      variant: nonlinear
+      hidden_dim: 256
+      output_dim: 1
+      multimodal: false
+    - name: multimodal_linear
+      input_dim: ${module.moe_encoder.hidden_dim}
+      variant: linear
+      output_dim: 1
+      multimodal: true
+    - name: multimodal_nonlinear
+      input_dim: ${module.moe_encoder.hidden_dim}
+      variant: nonlinear
+      hidden_dim: 256
+      output_dim: 1
+      multimodal: true
 data:
-  filename: merged_data_deduplicated_with_benchmarks_n=56k.csv
-  num_workers: 128
-  batch_size: 32
+  filename: merged_data_deduplicated_with_benchmarks_log.csv # merged_data_deduplicated_with_benchmarks_n=56k.csv #
+  num_workers: 8
+  batch_size: 2024 # for 4 devices
   drop_last: true
   shuffle: false
   recreate: false
@@ -89,12 +110,18 @@ data:
     - name: graph
       weight: 1.0
   modalities:
+  # - name: chemgpt
+  #   input: smiles
+  #   output: embedding
+  #   dim: 2048
+  #   processing: batch
+  #   batch_size: 64
   - name: chemgpt
-    input: smiles
+    input: precomputed
     output: embedding
+    colname: chemgpt_embedding_path
     dim: 2048
-    processing: batch
-    batch_size: 128
+    processing: multiprocess
   - name: graph
     input: smiles
     output: graph
@@ -128,7 +155,7 @@ data:
   labels:
   - name: chembl_targets
     colname: chembl_targets_path
-    dim: 296
+    dim: 306
   - name: tdc_targets
     colname: tdc_targets_path
     dim: 672
@@ -138,30 +165,30 @@ data:
   - name: nabla_targets
     colname: nabla_targets_path
     dim: 17
-  label_strategy: modality # modality, label
+  label_strategy: modality # modality, label, none
   benchmark_labels:
-    asap_potency: 
-      type: regression
-      labels:
-      - pIC50 (MERS-CoV Mpro) 
-      - pIC50 (SARS-CoV-2 Mpro)
-    asap_admet:
-      type: regression
-      labels:
-      - log_HLM 
-      - log_KSOL
-      - LogD 
-      - log_MDR1-MDCKII 
-      - log_MLM 
-    biogen_adme:
-      type: regression
-      labels:
-      - hlm_clint
-      - mdr1_mdck_er
-      - plasma_protein_binding_human
-      - plasma_protein_binding_rat
-      - rlm_clint
-      - solubility_ph_6_8
+    # asap_potency: 
+    #   type: regression
+    #   labels:
+    #   - pIC50 (MERS-CoV Mpro) 
+    #   - pIC50 (SARS-CoV-2 Mpro)
+    # asap_admet:
+    #   type: regression
+    #   labels:
+    #   - log_HLM 
+    #   - log_KSOL
+    #   - LogD 
+    #   - log_MDR1-MDCKII 
+    #   - log_MLM 
+    # biogen_adme:
+    #   type: regression
+    #   labels:
+    #   - hlm_clint
+    #   - mdr1_mdck_er
+    #   - plasma_protein_binding_human
+    #   - plasma_protein_binding_rat
+    #   - rlm_clint
+    #   - solubility_ph_6_8
     # tox21_linz:
     #   type: classification
     #   labels:
@@ -189,6 +216,18 @@ data:
       - log_MGMB
       - log_MLM CLint
       - log_MPPB
+    bindingdb954:
+      type: regression
+      labels:
+      - pKi_954
+    bindingdb962:
+      type: regression
+      labels:
+      - pKi_962
+    bindingdb963:
+      type: regression
+      labels:
+      - pKi_963
 hydra:
   run:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}

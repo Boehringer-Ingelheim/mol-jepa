@@ -1,3 +1,5 @@
+from unicodedata import name
+
 import torch
 import logging
 import torch.nn as nn
@@ -9,92 +11,58 @@ from models.modules.atoms_encoder import AtomsEncoder
 from models.modules.emb_encoder import EmbEncoder
 from models.modules.graph_encoder import GraphEncoder
 from models.losses.sigreg import SlicedEppsPulley
+from models.modules.prediction_head import MultiModalPredictor
 
 
 class MolJEPA(nn.Module):
+    """Molecular Joint Embedding Predictive Architecture"""
+
     def __init__(
         self,
         modalities_spec: Union[list, ListConfig],
         labels_spec: Union[list, ListConfig],
-        label_strategy: str,
         moe_encoder_spec: dict,
         expert_encoders_spec: dict,
+        train_config: dict,
     ):
         super().__init__()
         self.logger = logging.getLogger(__name__)
         self.modalities_spec = modalities_spec
         self.labels_spec = labels_spec
-        self.label_strategy = label_strategy
         self.moe_encoder_spec = moe_encoder_spec
         self.expert_encoders_spec = expert_encoders_spec
-        self.weighted_loss = moe_encoder_spec.get("weighted_loss", False)
+        self.label_strategy = train_config["label_strategy"]
+        self.weighted_loss = train_config["weighted_loss"]
+        self.loss_projection = train_config["loss_projection"]
+        self.cls_sigreg = train_config["cls_sigreg"]
+        self.cls_predictor = train_config["cls_predictor"]
+        self.hidden_dim = moe_encoder_spec["hidden_dim"]
+
+        # Init components
         if self.weighted_loss:
-            self.weight_map = {w["name"]: w["weight"]  for w in moe_encoder_spec["weights"]}
+            self.weight_map = {w["name"]: w["weight"] for w in train_config["weights"]}
         self.apply_label_strategy()
         self.modalities_dict = {mod["name"]: mod for mod in self.modalities_spec}
         self.sigreg = SlicedEppsPulley(num_slices=1024, t_max=3.0, n_points=17)
-        self.encoders = nn.ModuleDict()
-        for mod in self.modalities_spec:
-            name = mod["name"]
-            output_type = mod["output"]
-            if output_type == "graph":
-                spec = expert_encoders_spec["graph_encoder"]
-                self.encoders[name] = GraphEncoder(
-                    node_dim=mod["node_dim"],
-                    edge_dim=mod["edge_dim"],
-                    layers=spec["layers"],
-                    layer_type=spec["layer_type"],
-                    hidden_dim=spec["hidden_dim"],
-                    output_dim=spec["output_dim"],
-                    activation=spec["activation"],
-                    dropout=spec["dropout"],
-                    attn_heads=spec["attn_heads"],
-                    pooling=spec["pooling"],
-                )
-            elif output_type == "atoms":
-                spec = expert_encoders_spec["atom_encoder"]
-                self.encoders[name] = AtomsEncoder(
-                    node_dim=mod["node_dim"],
-                    layers=spec["layers"],
-                    hidden_dim=spec["hidden_dim"],
-                    output_dim=spec["output_dim"],
-                    attn_heads=spec["attn_heads"],
-                    dropout=spec["dropout"],
-                )
-            else:
-                spec = expert_encoders_spec["emb_encoder"]
-                self.encoders[name] = EmbEncoder(
-                    input_dim=mod["dim"],
-                    layers=spec["layers"],
-                    hidden_dim=spec["hidden_dim"],
-                    output_dim=spec["output_dim"],
-                    dropout=spec["dropout"],
-                )
-        
-        hidden_dim = moe_encoder_spec["hidden_dim"]
-        self.pooling_strategy = moe_encoder_spec.get("pooling_strategy")
-        if self.pooling_strategy == "softmax_attention":
-            self.attn_query = nn.Linear(hidden_dim, 1)
+        self._init_encoders()
 
-        self.use_prediction_head = moe_encoder_spec.get("use_prediction_head", False)
-        if self.use_prediction_head:
-            prediction_dim = hidden_dim + len(modalities_spec)
-            self.jepa_head = nn.Sequential(
-                nn.Linear(prediction_dim, hidden_dim),
-                nn.BatchNorm1d(hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim),
-            )
-        self.use_loss_projection = moe_encoder_spec.get("use_loss_projection", False)
-        if self.use_loss_projection:
-            self.projection_head = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.BatchNorm1d(hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, int(hidden_dim / 4)),
+        # Cross attention prediction head
+        n_modalities = len(self.modalities_spec)
+        self.transformer_head = MultiModalPredictor(
+            hidden_dim=self.hidden_dim,
+            n_heads=moe_encoder_spec["attn_heads"],
+            n_layers=moe_encoder_spec["attn_layers"],
+            n_modalities=n_modalities + 1,  # +1 for cls token
+            dropout=moe_encoder_spec["dropout"],
+        )
+        self.cls_token = nn.Parameter(torch.randn(1, 1, self.hidden_dim))
+        if self.loss_projection:
+            self.loss_proj = nn.ModuleList(
+                [nn.Linear(self.hidden_dim, 128) for _ in self.modalities_dict]
             )
 
     def apply_label_strategy(self):
+        """Add labels either as modalities or labels with prediction heads."""
         if self.label_strategy == "modality":
             for label_spec in self.labels_spec:
                 self.modalities_spec.append(
@@ -109,31 +77,65 @@ class MolJEPA(nn.Module):
             self.prediction_heads = nn.ModuleDict()
             for label_spec in self.labels_spec:
                 self.prediction_heads[label_spec["name"]] = nn.Linear(
-                    self.moe_encoder_spec["hidden_dim"], label_spec["dim"]
+                    self.hidden_dim, label_spec["dim"]
                 )
         else:
-            self.logger.warning("Label strategy not yet implemented. Ignoring labels... ")
+            self.logger.warning(
+                "Label strategy not yet implemented. Ignoring labels... "
+            )
 
-    def pooling(self, x, batch):
-        pass
+    def _init_encoders(self):
+        self.encoders = nn.ModuleDict()
+        for mod in self.modalities_spec:
+            name = mod["name"]
+            output_type = mod["output"]
+            if output_type == "graph":
+                spec = self.expert_encoders_spec["graph_encoder"]
+                self.encoders[name] = GraphEncoder(
+                    node_dim=mod["node_dim"],
+                    edge_dim=mod["edge_dim"],
+                    layers=spec["layers"],
+                    layer_type=spec["layer_type"],
+                    hidden_dim=spec["hidden_dim"],
+                    output_dim=spec["output_dim"],
+                    activation=spec["activation"],
+                    dropout=spec["dropout"],
+                    attn_heads=spec["attn_heads"],
+                    pooling=spec["pooling"],
+                )
+            elif output_type == "atoms":
+                spec = self.expert_encoders_spec["atom_encoder"]
+                self.encoders[name] = AtomsEncoder(
+                    node_dim=mod["node_dim"],
+                    layers=spec["layers"],
+                    hidden_dim=spec["hidden_dim"],
+                    output_dim=spec["output_dim"],
+                    attn_heads=spec["attn_heads"],
+                    dropout=spec["dropout"],
+                )
+            else:
+                spec = self.expert_encoders_spec["emb_encoder"]
+                self.encoders[name] = EmbEncoder(
+                    input_dim=mod["dim"],
+                    layers=spec["layers"],
+                    hidden_dim=spec["hidden_dim"],
+                    output_dim=spec["output_dim"],
+                    dropout=spec["dropout"],
+                )
 
-    def forward(self, batch, modalities, mask, active_mask) -> torch.Tensor:
-        modalities = [
+    def encode(self, batch, modalities, active_mask):
+        """Encode all active modalities once. Returns per-sample embeddings."""
+        modalities_ext = [
             self.modalities_dict[mod.replace("_x_ptr", "")] if mod is not None else None
             for mod in modalities
         ]
 
-        # Guard: mask columns must match modality count
-        assert mask.size(1) == len(modalities), (
-            f"mask has {mask.size(1)} cols but {len(modalities)} modalities"
-        )
-        assert active_mask.size(1) == len(modalities), (
-            f"active_mask has {active_mask.size(1)} cols but {len(modalities)} modalities"
-        )
-
+        batch_size = active_mask.size(0)
+        hidden_dim = self.hidden_dim
+        n_mods = len(modalities_ext)
         embeddings = []
 
-        for i, mod in enumerate(modalities):
+        for i, mod in enumerate(modalities_ext):
             if mod:
                 name = mod["name"]
                 encoder = self.encoders[name]
@@ -155,23 +157,50 @@ class MolJEPA(nn.Module):
                     x = batch[f"{name}_x"]
                     emb = encoder(x)
 
-                sparse_mask = mask[:, i][active_mask[:, i]]
-                embeddings.append((i, emb[sparse_mask]))
+                embeddings.append((i, emb))
 
-        batch_size = mask.size(0)
-        n_cols = mask.size(1)
-        hidden_dim = self.moe_encoder_spec["hidden_dim"]
-        full = torch.zeros(batch_size, n_cols, hidden_dim, device=mask.device)
-
+        dtype = embeddings[0][1].dtype if embeddings else next(self.parameters()).dtype
+        full = torch.zeros(
+            batch_size,
+            n_mods,
+            hidden_dim,
+            device=active_mask.device,
+            dtype=dtype,
+        )
         for col_i, emb in embeddings:
-            full[mask[:, col_i] & active_mask[:, col_i], col_i] = emb
+            full[active_mask[:, col_i], col_i] = emb
 
-        if self.pooling_strategy == "softmax_attention":
-            scores = self.attn_query(full).squeeze(-1).masked_fill(~mask, float("-inf"))
-            combined = (torch.softmax(scores, dim=1).unsqueeze(-1) * full).sum(dim=1)
-        elif self.pooling_strategy == "mean":
-            combined = full.sum(dim=1) / mask.sum(dim=1, keepdim=True).clamp(min=1)    
-        return combined
+        return full
+
+    def predict(self, full, pred_mask, active_mask):
+        """Run transformer head on pre-computed embeddings with prediction masking."""
+        batch_size = pred_mask.size(0)
+        device = pred_mask.device
+
+        cls = self.cls_token.expand(batch_size, -1, -1)
+        x = torch.cat([cls, full], dim=1)
+
+        cls_col_zero = torch.zeros(batch_size, 1, dtype=torch.bool, device=device)
+        cls_col_one = torch.ones(batch_size, 1, dtype=torch.bool, device=device)
+
+        # Targets get replaced by mask tokens inside the head
+        predict_mask_cls = torch.cat([cls_col_zero, ~pred_mask], dim=1)
+
+        # Active = real content. CLS is always active.
+        active_mask_cls = torch.cat([cls_col_one, active_mask], dim=1)
+        missing_mask_cls = ~active_mask_cls
+
+        if self.cls_predictor:
+            # Also hide context modalities from attention so only CLS provides content.
+            hide_context = torch.cat([cls_col_zero, pred_mask & active_mask], dim=1)
+            missing_mask_cls = missing_mask_cls | hide_context
+
+        out, embeddings = self.transformer_head(
+            x, mask=predict_mask_cls, missing_mask=missing_mask_cls
+        )
+        cls = out[:, 0, :]
+        preds = out[:, 1:, :]
+        return preds, cls, embeddings
 
 
 # ----------------------------------------
@@ -181,10 +210,10 @@ class MolJEPA(nn.Module):
 
 def ssl_forward(self, batch: Dict, stage: str):
     """
+    Self-supervised (masked) forward pass for JEPA called during training.
     self is the stable-pretraining module wrapper, so we need to access the model with self.model
     """
     model_cfg = self.hparams["module"]
-    data_cfg = self.hparams["data"]
 
     modalities = [
         m["name"] + "_x_ptr" if m["name"] + "_x_ptr" in batch else None
@@ -198,97 +227,155 @@ def ssl_forward(self, batch: Dict, stage: str):
         for k in modalities
     ]
     active_mask = (torch.stack(active_modalities) > 0).t()
+    pred_mask = ratio_mask(active_mask, model_cfg["train_config"]["masking_ratio"])
 
-    # Create masks for 2 passes
-    pass_1_mask, pass_2_mask = sample_masks(
-        active_mask,
-        model_cfg["moe_encoder"]["masking_strategy"],
-        ratio=model_cfg["moe_encoder"]["masking_ratio"],
-    )
+    # Encode once, predict from cached embeddings
+    targets = self.model.encode(batch, modalities, active_mask)
+    predictions, cls, embeddings = self.model.predict(targets, pred_mask, active_mask)
 
-    # Use the other pass mask as features
-    embedding_1 = self.model(batch, modalities, pass_1_mask, active_mask)
-    embedding_2 = self.model(batch, modalities, pass_2_mask, active_mask)
-
-    # Prediction head
-    if self.model.use_prediction_head:
-        embedding_1 = self.model.jepa_head(
-            torch.cat([embedding_1, pass_2_mask.float()], dim=-1)
-        )
-        embedding_2 = self.model.jepa_head(
-            torch.cat([embedding_2, pass_1_mask.float()], dim=-1)
-        )
-
-    # SSL-style projection
-    if self.model.use_loss_projection:
-        z1 = self.model.projection_head(embedding_1)
-        z2 = self.model.projection_head(embedding_2)
-    else:
-        z1, z2 = embedding_1, embedding_2
-
-    # Modality weights
-    if self.model.weighted_loss:
-        modality_weights = [
-            self.model.weight_map[m.replace("_x_ptr", "")] if m else 0.0
-            for m in modalities
-        ]
-        modality_weights = torch.tensor(modality_weights, device=z1.device)
-        stacked_weights = modality_weights.unsqueeze(0).repeat(z1.size(0), 1)
-        masked_weights = stacked_weights * pass_1_mask.float()
-        weights = masked_weights.sum(dim=1) / pass_1_mask.sum(dim=1).clamp(min=1)
-
-        # We might have to use a different masking strategy if we mask both sides!
-        if self.model.masking_strategy != "ratio_first_pass":
-            raise NotImplementedError("Weighted loss currently only implemented for ratio_first_pass masking strategy.")
-    else:
-        weights = None
-
-    loss, l2_loss, sigreg_loss = compute_loss(
+    # Prediction loss
+    losses = compute_loss(
         self.model,
-        z1,
-        z2,
-        lamb=model_cfg["moe_encoder"]["lambda"],
-        weights=weights
+        predictions,
+        cls,
+        targets,
+        lamb=model_cfg["train_config"]["lambda"],
+        pred_mask=pred_mask,
+        active_mask=active_mask,
     )
 
-    # Label loss
-    if data_cfg.label_strategy == "label":
-        for label_name in self.model.prediction_heads.keys():
-            if label_name + "_x" not in batch:
-                continue
-            pred = self.model.prediction_heads[label_name](embedding_1)
-            target = batch[label_name + "_x"]
-            # Nan mask
-            mask = ~torch.isnan(target)
-            raise NotImplementedError("This requires batch tracing.")
-            if mask.sum() > 0:
-                label_loss = F.mse_loss(pred[mask], target[mask])
-                loss += label_loss
+    # If labels as supervised loss
+    if self.model.label_strategy == "label":
+        supervised_loss = compute_supervised_loss(self.model, cls, batch, model_cfg)
+        losses.update(supervised_loss)
+        losses["loss"] += supervised_loss["supervised_loss"]
 
     out_dict = {
-        "loss": loss,
-        "l2_loss": l2_loss,
-        "sigreg_loss": sigreg_loss,
+        **losses,
         "stage": stage,
-        "batch_size": embedding_1.size(0),
-        "embedding_1": embedding_1,
-        "embedding_2": embedding_2,
+        "batch_size": targets.size(0),
+        "embeddings": targets.detach(),
+        "embeddings_pred": predictions.detach(),
+        "embeddings_cls": cls.detach(),
+        "embeddings_z": embeddings.detach(),
+        "active_mask": active_mask.detach(),
+        "pred_mask": pred_mask.detach(),
         **extract_benchmark_labels(batch),
     }
+
+    # Add modality-specific embeddings for diagnostics
+    for i, mod in enumerate(model_cfg["modalities"]):
+        name = mod["name"]
+        if mod is not None:
+            out_dict[f"embedding_{name}"] = targets[:, i, :].detach()
+            out_dict[f"embedding_pred_{name}"] = predictions[:, i, :].detach()
+        else:
+            out_dict[f"embedding_{name}"] = torch.full(
+                (targets.size(0), targets.size(2)), float("nan"), device=targets.device
+            )
+
     log_metrics(self, out_dict, stage)
     return out_dict
 
 
+def get_weights(self, modalities, predictions, pred_mask):
+    modality_weights = [
+        self.weight_map[m.replace("_x_ptr", "")] if m else 0.0 for m in modalities
+    ]
+    modality_weights = torch.tensor(
+        modality_weights, device=predictions.device, dtype=predictions.dtype
+    )
+    stacked_weights = modality_weights.unsqueeze(0).repeat(predictions.size(0), 1)
+    masked_weights = stacked_weights * pred_mask.to(dtype=predictions.dtype)
+    weights = masked_weights.sum(dim=1) / pred_mask.sum(dim=1).clamp(min=1)
+    return weights
+
+
+def compute_supervised_loss(self, cls, batch, model_cfg):
+
+    supervised_losses = {}
+    agg_loss = cls.new_zeros(())
+    for label_spec in model_cfg["labels"]:
+        name = label_spec["name"]
+        ptr_key = f"{name}_x_ptr"
+        if ptr_key not in batch:
+            continue
+        ptr = batch[ptr_key]
+        present = (ptr[1:] - ptr[:-1]) > 0  # (B,) bool: which samples have this label
+        if not bool(present.any()):
+            continue
+        head = self.prediction_heads[name]
+        pred = head(cls[present])
+        truth = batch[f"{name}_x"]
+        mse_loss = F.mse_loss(pred, truth)
+        supervised_losses[f"supervised_loss_{name}"] = mse_loss
+        agg_loss = agg_loss + mse_loss
+
+    supervised_losses["supervised_loss"] = agg_loss
+    return supervised_losses
+
+
 def compute_loss(
-    self, embedding_1: torch.Tensor, embedding_2: torch.Tensor, lamb: float = 0.01, weights: torch.Tensor = None
-):  
-    if weights is not None:
-        l2_loss = (((embedding_1 - embedding_2)**2) * weights.unsqueeze(1)).mean()
+    self,
+    predictions: torch.Tensor,
+    cls: torch.Tensor,
+    targets: torch.Tensor,
+    lamb: float = 0.01,
+    pred_mask: torch.Tensor = None,
+    active_mask: torch.Tensor = None,
+):
+    losses = {}
+    _zero = torch.tensor(0.0, device=predictions.device, dtype=predictions.dtype)
+
+    if self.weighted_loss:
+        modalities = [m["name"] for m in self.modalities_spec]
+        weights = get_weights(self, modalities, predictions, pred_mask)
     else:
-        l2_loss = (((embedding_1 - embedding_2)**2)).mean()
-    sigreg_loss = self.sigreg(embedding_1) + self.sigreg(embedding_2)
-    loss = l2_loss + lamb * sigreg_loss
-    return loss, l2_loss, sigreg_loss
+        weights = None
+
+    # For DDP always return all modalities, even if some are empty
+    for i in range(predictions.size(1)):
+        active_samples = active_mask[:, i]
+        if active_samples.sum() < 2:
+            # Not enough samples for sigreg, but still register the keys
+            losses[f"sigreg_loss_m_{i}"] = _zero
+            losses[f"pred_loss_m_{i}"] = _zero
+            continue
+
+        # We apply sigreg on the targets, which are more stable
+        emb_i = targets[active_samples, i, :]  # (n_active, D)
+        sigreg_loss = self.sigreg(emb_i)
+        losses[f"sigreg_loss_m_{i}"] = sigreg_loss * lamb
+
+        # Prediction loss
+        prediction_samples = ~pred_mask[:, i] & active_mask[:, i]
+        if prediction_samples.sum() > 0:
+            pred_i = predictions[prediction_samples, i, :]
+            target_i = targets[prediction_samples, i, :]
+
+            if self.loss_projection:
+                proj = self.loss_proj[i]
+                pred_i = proj(pred_i)
+                target_i = proj(target_i)
+
+            if weights is not None:
+                w_i = weights[prediction_samples].unsqueeze(1)
+                l2_loss = F.mse_loss(pred_i * w_i, target_i * w_i)
+            else:
+                l2_loss = F.mse_loss(pred_i, target_i)
+            losses[f"pred_loss_m_{i}"] = l2_loss
+        else:
+            losses[f"pred_loss_m_{i}"] = _zero
+
+    if self.cls_sigreg:
+        # Apply sigreg to cls token as well
+        cls_sigreg_loss = self.sigreg(cls)
+        losses["sigreg_loss_cls"] = cls_sigreg_loss * lamb
+
+    losses["loss"] = sum(losses.values())
+    losses["sigreg_loss"] = sum(v for k, v in losses.items() if "sigreg_loss" in k)
+    losses["pred_loss"] = sum(v for k, v in losses.items() if "pred_loss" in k)
+    return losses
 
 
 def ratio_mask(active_mask: torch.Tensor, ratio: float):
@@ -310,39 +397,6 @@ def ratio_mask(active_mask: torch.Tensor, ratio: float):
     return mask
 
 
-def sample_masks(
-    active_mask: torch.Tensor, strategy="one_hot", ratio: float = 0.1
-) -> torch.Tensor:
-    if strategy == "one_hot":
-        rows, cols = active_mask.shape
-        scores = torch.rand(rows, cols, device=active_mask.device)
-        scores = scores.masked_fill(~active_mask, float("-inf"))
-
-        # Randomly pick among true ones
-        idx = scores.argmax(dim=1)
-        onehot = F.one_hot(idx, num_classes=cols).to(dtype=torch.bool)
-
-        # Build masks
-        mask1 = onehot & active_mask
-        mask2 = active_mask & ~mask1
-
-        # If a row has no active modality, assign it to mask1
-        empty_rows = ~mask2.any(dim=1)
-        mask2[empty_rows] = mask1[empty_rows]
-    elif strategy == "ratio":
-        masks = []
-        for _ in range(2):
-            mask = ratio_mask(active_mask, ratio)
-            masks.append(mask)
-        mask1, mask2 = masks
-    elif strategy == "ratio_first_pass":
-        mask1 = ratio_mask(active_mask, ratio)
-        mask2 = active_mask.clone()
-    else:
-        raise NotImplementedError(f"Sampling strategy {strategy} not implemented")
-    return mask1, mask2
-
-
 def extract_benchmark_labels(batch):
     benchmark_labels = {
         k: batch[k].reshape(-1, 1).float()
@@ -356,30 +410,26 @@ def log_metrics(self, out_dict, stage):
     # Add flag when its weighted loss
     if self.model.weighted_loss:
         stage = f"{stage}_weighted"
-    self.log(
-        f"{stage}_loss",
-        out_dict["loss"],
-        on_step=False,
-        on_epoch=True,
-        prog_bar=True,
-        batch_size=out_dict["batch_size"],
-    )
-    self.log(
-        f"{stage}_sigreg_loss",
-        out_dict["sigreg_loss"],
-        on_step=False,
-        on_epoch=True,
-        prog_bar=True,
-        batch_size=out_dict["batch_size"],
-    )
-    self.log(
-        f"{stage}_l2_loss",
-        out_dict["l2_loss"],
-        on_step=False,
-        on_epoch=True,
-        prog_bar=True,
-        batch_size=out_dict["batch_size"],
-    )
+
+    for key, value in out_dict.items():
+        if "loss" in key:
+            self.log(
+                f"{stage}_{key}",
+                value,
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+                prog_bar=key == "loss",
+                batch_size=out_dict["batch_size"],
+            )
 
     if hasattr(self, "hp_metric"):
-        self.log("hp_metric", self.hp_metric, on_step=False, on_epoch=True, prog_bar=False)
+        self.log(
+            "hp_metric",
+            self.hp_metric,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            sync_dist=True,
+            batch_size=out_dict.get("batch_size", None),
+        )

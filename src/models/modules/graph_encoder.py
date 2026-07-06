@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from torch_geometric.nn import TransformerConv, global_mean_pool, global_max_pool
 
 
@@ -35,7 +36,9 @@ class GraphEncoder(nn.Module):
         self.dropout = dropout
 
         # Project input to hidden_dim so residual connections work at every layer
-        self.input_proj = nn.Linear(node_dim, hidden_dim) if node_dim != hidden_dim else nn.Identity()
+        self.input_proj = (
+            nn.Linear(node_dim, hidden_dim) if node_dim != hidden_dim else nn.Identity()
+        )
 
         self.convs = nn.ModuleList()
         self.norms = nn.ModuleList()
@@ -56,19 +59,33 @@ class GraphEncoder(nn.Module):
             self.norms.append(nn.LayerNorm(hidden_dim))
 
         self.proj = nn.Linear(hidden_dim, output_dim)
+        self.gradient_checkpointing = True
+
+    def _conv_block(self, conv, norm, x, edge_index, edge_attr):
+        residual = x
+        x = conv(x, edge_index, edge_attr)
+        x = self.act(x)
+        if self.dropout > 0:
+            x = F.dropout(x, p=self.dropout, training=self.training)
+        x = norm(x + residual)
+        return x
 
     def forward(self, x, edge_index, edge_attr, batch):
         x = self.input_proj(x)
 
         for conv, norm in zip(self.convs, self.norms):
-            residual = x
-            x = conv(x, edge_index, edge_attr)
-            x = self.act(x)
-
-            if self.dropout > 0:
-                x = F.dropout(x, p=self.dropout, training=self.training)
-
-            x = norm(x + residual)
+            if self.gradient_checkpointing and self.training:
+                x = checkpoint(
+                    self._conv_block,
+                    conv,
+                    norm,
+                    x,
+                    edge_index,
+                    edge_attr,
+                    use_reentrant=False,
+                )
+            else:
+                x = self._conv_block(conv, norm, x, edge_index, edge_attr)
 
         x = self.pool(x, batch)
         return self.proj(x)

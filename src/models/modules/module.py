@@ -10,9 +10,9 @@ def get_module(cfg) -> spt.Module:
     model = MolJEPA(
         modalities_spec=module_cfg.modalities,
         labels_spec=module_cfg.labels,
-        label_strategy=module_cfg.label_strategy,
         moe_encoder_spec=module_cfg.moe_encoder,
         expert_encoders_spec=module_cfg.expert_encoders,
+        train_config=module_cfg.train_config,
     )
     optimizer_cfg = cfg["module"]["optimizer"]
 

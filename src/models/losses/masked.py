@@ -21,13 +21,16 @@ class MaskedMAE(torchmetrics.Metric):
 
     def compute(self):
         if self.total == 0:
-            return None
+            return torch.tensor(float("nan"), device=self.sum_abs_error.device)
         return self.sum_abs_error / self.total
 
 
 def masked_mae_loss(preds, targets):
     mask = ~targets.isnan()
     if mask.sum() == 0:
-        return torch.tensor(float('nan'), device=preds.device, requires_grad=True)
+        # Return a zero that stays in the computation graph (connected to preds)
+        # so DDP doesn't see unused probe parameters. Using a NaN leaf tensor
+        # would detach the probe from the backward graph entirely.
+        return (preds * 0.0).sum()
     
     return torchmetrics.functional.mean_absolute_error(preds[mask], targets[mask])
