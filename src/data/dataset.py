@@ -47,6 +47,8 @@ class MoleculeDataset(Dataset):
         processed_file=None,
         num_workers=8,
         use_memmap=False,
+        use_ragged_memmap=False,
+        use_cache=False,
     ):
         load_dotenv()
         for var in ["DATA_DIR", "PROCESSED_DATA_DIR"]:
@@ -72,6 +74,7 @@ class MoleculeDataset(Dataset):
         self.data_table = None
         self.num_workers = num_workers
         self.use_memmap = use_memmap
+        self.use_ragged_memmap = use_ragged_memmap
         self.memmap_dir = self._processed_dir / "memmaps"
         self.logger = logging.getLogger(__name__)
         self.follow_batch = []
@@ -125,16 +128,19 @@ class MoleculeDataset(Dataset):
             )
 
         self.build_numpy_caches()
+        self.use_cache = False
         self.cache = {}
 
     def _lazy_init_memmaps(self):
         """Safely opens unique file handles for whichever process calls it."""
         if self.use_memmap:
-            # These functions will now target the local process space natively
             self.memmaps = open_memmaps(self.memmap_dir, self.filename, self.logger)
-            self.ragged_memmaps = open_ragged_memmaps(
-                self.memmap_dir, self.filename, self.logger
-            )
+            if self.use_ragged_memmap:
+                self.ragged_memmaps = open_ragged_memmaps(
+                    self.memmap_dir, self.filename, self.logger
+                )
+            else:
+                self.ragged_memmaps = {}
         else:
             self.memmaps = {}
             self.ragged_memmaps = {}
@@ -326,9 +332,9 @@ class MoleculeDataset(Dataset):
             if pd.isna(query_data[precomputed_colname]):
                 return None
             if batch:
-                data = encoder.encode_batch(
-                    [str(root_dir / q[precomputed_colname]) for q in query_data]
-                )
+                data = encoder.encode_batch([
+                    str(root_dir / q[precomputed_colname]) for q in query_data
+                ])
             else:
                 data = encoder.encode(str(root_dir / query_data[precomputed_colname]))
 
@@ -593,8 +599,7 @@ class MoleculeDataset(Dataset):
 
             # Load regular memmap data
             if encoder_name in self.memmaps:
-                assert True
-                emb = torch.from_numpy(self.memmaps[encoder_name][memmap_idx]).clone()
+                emb = torch.from_numpy(self.memmaps[encoder_name][memmap_idx].copy())
                 data.add_mol_embedding(encoder_name, emb)
                 continue
 
@@ -635,7 +640,8 @@ class MoleculeDataset(Dataset):
         #     data.add_mol_embedding(label_name, torch.from_numpy(labels).float())
 
         # Save in cache
-        self.cache[idx] = data
+        if self.use_cache:
+            self.cache[idx] = data
         return data
 
 
@@ -679,8 +685,13 @@ class MultimodalData(Data):
     def __inc__(self, key, value, *args, **kwargs):
         if key.endswith("edge_index"):
             prefix = key.replace("edge_index", "x")
-            if hasattr(self, prefix):
-                return getattr(self, prefix).shape[0]
+            x = getattr(self, prefix, None)
+            if x is not None:
+                return x.shape[0]
+            # No node features for this modality on this sample -> treat as
+            # an empty graph (0 nodes) instead of falling through to PyG's
+            # default which raises when num_nodes cannot be inferred.
+            return 0
         return super().__inc__(key, value, *args, **kwargs)
 
     def __cat_dim__(self, key, value, *args, **kwargs):

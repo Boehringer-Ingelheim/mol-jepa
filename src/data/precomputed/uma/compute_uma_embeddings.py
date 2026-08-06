@@ -16,19 +16,34 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../"))
 from models.backbones.uma import UMAEncoder
 
-ROOT_DIR = "/scratch/cds/MolML/JEPA/data"
-OUTPUT_DIR = "/scratch/cds/MolML/JEPA/uma"
+ROOT_DIR = "<path>/data"
+OUTPUT_DIR = "<path>/uma"
 BATCH_SIZE = 64
 USE_CACHE = True
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compute UMA embeddings for conformers.")
-    parser.add_argument("--csv", type=str, required=True, help="CSV filename relative to root dir")
-    parser.add_argument("--root", type=str, default=ROOT_DIR, help="Root directory for data")
-    parser.add_argument("--output", type=str, default=OUTPUT_DIR, help="Output directory for embeddings")
-    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE, help="Batch size for encoding")
-    parser.add_argument("--use_cache", type=bool, default=USE_CACHE, help="Whether to use cached embeddings")
+    parser = argparse.ArgumentParser(
+        description="Compute UMA embeddings for conformers."
+    )
+    parser.add_argument(
+        "--csv", type=str, required=True, help="CSV filename relative to root dir"
+    )
+    parser.add_argument(
+        "--root", type=str, default=ROOT_DIR, help="Root directory for data"
+    )
+    parser.add_argument(
+        "--output", type=str, default=OUTPUT_DIR, help="Output directory for embeddings"
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=BATCH_SIZE, help="Batch size for encoding"
+    )
+    parser.add_argument(
+        "--use_cache",
+        type=bool,
+        default=USE_CACHE,
+        help="Whether to use cached embeddings",
+    )
     args = parser.parse_args()
 
     # Create a subdirectory for this CSV's embeddings
@@ -51,8 +66,12 @@ def main():
     n_batches = (len(indices) + args.batch_size - 1) // args.batch_size
     failed_count = 0
 
-    for batch_start in tqdm(range(0, len(indices), args.batch_size), total=n_batches, desc="Computing UMA embeddings"):
-        batch_indices = indices[batch_start: batch_start + args.batch_size]
+    for batch_start in tqdm(
+        range(0, len(indices), args.batch_size),
+        total=n_batches,
+        desc="Computing UMA embeddings",
+    ):
+        batch_indices = indices[batch_start : batch_start + args.batch_size]
 
         # Skip rows that already have embeddings
         if args.use_cache:
@@ -82,10 +101,14 @@ def main():
                 valid_indices.append(idx)
             except Exception as e:
                 failed_count += 1
-                print(f"Index {idx}: Failed to read ASE data from {conformer_path}: {e}")
+                print(
+                    f"Index {idx}: Failed to read ASE data from {conformer_path}: {e}"
+                )
 
         if len(atoms_list) == 0:
-            print(f"No valid conformers in batch {batch_start // args.batch_size + 1}/{n_batches}, skipping.")
+            print(
+                f"No valid conformers in batch {batch_start // args.batch_size + 1}/{n_batches}, skipping."
+            )
             continue
 
         # Try batch encoding first, fall back to individual encoding on failure
@@ -100,7 +123,9 @@ def main():
                 df["uma_embedding_path"].at[idx] = out_path
 
         except Exception as e:
-            print(f"Batch encoding failed ({e}), falling back to individual encoding...")
+            print(
+                f"Batch encoding failed ({e}), falling back to individual encoding..."
+            )
             for i, idx in enumerate(valid_indices):
                 try:
                     embedding = encoder.encode(atoms_list[i])
@@ -111,7 +136,10 @@ def main():
                     failed_count += 1
                     print(f"Index {idx}: Individual encoding also failed: {e2}")
                     traceback.print_exc()
-    df.to_csv(os.path.join(OUTPUT_DIR_FULL, f"{args.csv.replace('.csv', '_uma.csv')}"), index=False)
+    df.to_csv(
+        os.path.join(OUTPUT_DIR_FULL, f"{args.csv.replace('.csv', '_uma.csv')}"),
+        index=False,
+    )
     print(f"Done. Total failures: {failed_count}")
 
 

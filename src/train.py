@@ -1,4 +1,5 @@
 import hydra
+import torch
 import numpy as np
 import logging
 import lightning as pl
@@ -43,6 +44,7 @@ def filter_callbacks(callbacks):
 
 @hydra.main(config_path="config", config_name="moljepa", version_base="1.1")
 def main(cfg: DictConfig):
+    torch.set_float32_matmul_precision('medium')
     pl.seed_everything(cfg.seed, workers=True)
 
     logger.info("Loading dataset...")

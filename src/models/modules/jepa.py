@@ -57,22 +57,20 @@ class MolJEPA(nn.Module):
         )
         self.cls_token = nn.Parameter(torch.randn(1, 1, self.hidden_dim))
         if self.loss_projection:
-            self.loss_proj = nn.ModuleList(
-                [nn.Linear(self.hidden_dim, 128) for _ in self.modalities_dict]
-            )
+            self.loss_proj = nn.ModuleList([
+                nn.Linear(self.hidden_dim, 128) for _ in self.modalities_dict
+            ])
 
     def apply_label_strategy(self):
         """Add labels either as modalities or labels with prediction heads."""
         if self.label_strategy == "modality":
             for label_spec in self.labels_spec:
-                self.modalities_spec.append(
-                    {
-                        "name": label_spec["name"],
-                        "input": "precomputed",
-                        "output": "embedding",
-                        "dim": label_spec["dim"],
-                    }
-                )
+                self.modalities_spec.append({
+                    "name": label_spec["name"],
+                    "input": "precomputed",
+                    "output": "embedding",
+                    "dim": label_spec["dim"],
+                })
         elif self.label_strategy == "label":
             self.prediction_heads = nn.ModuleDict()
             for label_spec in self.labels_spec:

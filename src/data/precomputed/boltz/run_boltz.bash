@@ -4,7 +4,6 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem-per-gpu=48GB
 #SBATCH --gres=gpu:1
-#SBATCH --nodelist=inhccne0803
 #SBATCH --time=30-00:00:00
 
 cd /home/rottach/phd/p3_jepa/

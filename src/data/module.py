@@ -96,6 +96,8 @@ def split_dataset(dataset, cfg):
         num_workers=cfg.data.num_workers,
         processed_file=train_file_name,
         use_memmap=getattr(cfg.data, "use_memmap", False),
+        use_ragged_memmap=getattr(cfg.data, "use_ragged_memmap", False),
+        use_cache=getattr(cfg.data, "use_cache", False),
     )
 
     val_dataset = MoleculeDataset(
@@ -109,6 +111,8 @@ def split_dataset(dataset, cfg):
         num_workers=cfg.data.num_workers,
         processed_file=val_file_name,
         use_memmap=getattr(cfg.data, "use_memmap", False),
+        use_ragged_memmap=getattr(cfg.data, "use_ragged_memmap", False),
+        use_cache=getattr(cfg.data, "use_cache", False),
     )
 
     return train_dataset, val_dataset
@@ -144,6 +148,8 @@ def build_dataloaders(cfg):
         recreate=cfg.data.recreate,
         num_workers=cfg.data.num_workers,
         use_memmap=getattr(cfg.data, "use_memmap", False),
+        use_ragged_memmap=getattr(cfg.data, "use_ragged_memmap", False),
+        use_cache=getattr(cfg.data, "use_cache", False),
     )
     logger.info(
         f"Loaded dataset with {len(dataset)} samples | Modalities: {list(modalities_spec.keys())} \
@@ -166,6 +172,7 @@ def build_dataloaders(cfg):
         persistent_workers=cfg.data.num_workers > 0,
         prefetch_factor=4 if cfg.data.num_workers > 0 else None,
         collate_fn=Collater(train_dataset, follow_batch=follow_batch),
+        drop_last=cfg.data.get("drop_last", False),
     )
 
     val_loader = DataLoader(

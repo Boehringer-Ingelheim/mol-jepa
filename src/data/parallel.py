@@ -8,6 +8,7 @@ from models.backbones.base import MoleculeEncoder
 _worker_encoders = None
 _worker_modalities_spec = None
 
+
 def _worker_initializer(modalities_spec):
     """Initialize encoders inside each worker process to avoid pickling errors."""
     global _worker_encoders, _worker_modalities_spec
@@ -21,6 +22,7 @@ def _worker_initializer(modalities_spec):
         )
         _worker_encoders[encoder_name] = MoleculeEncoder.create(backbone)
 
+
 def _process_row_worker_fn(tensor_data_dir, root_dir, index, row):
     """Processes a single row by encoding its data and saving it as torch object."""
     global _worker_encoders, _worker_modalities_spec
@@ -33,9 +35,7 @@ def _process_row_worker_fn(tensor_data_dir, root_dir, index, row):
             results[encoder_name] = save_path
             continue
 
-        data = encode(
-            _worker_encoders[encoder_name], spec, row, root_dir
-        )
+        data = encode(_worker_encoders[encoder_name], spec, row, root_dir)
 
         if data is not None:
             data = (
@@ -47,6 +47,7 @@ def _process_row_worker_fn(tensor_data_dir, root_dir, index, row):
             results[encoder_name] = save_path
 
     return index, results
+
 
 def encode(encoder, spec, query_data, root_dir):
     """Module-level encoder results function for use in multiprocessing workers."""
@@ -69,8 +70,20 @@ def encode(encoder, spec, query_data, root_dir):
             return None
         data = encoder.encode(str(Path(root_dir) / query_data[precomputed_colname]))
 
-        # Make sure the precomputed dimensions match the expected dimensions
-        expected_dim = spec["dim"]
-        actual_dim = data.shape[-1]
-        assert (expected_dim == actual_dim), f"Precomputed embedding dimension mismatch for {spec['input']} modality '{precomputed_colname}': expected {expected_dim}, got {actual_dim}"
+        # Make sure the precomputed dimensions match the expected dimensions.
+        # For flat `precomputed` inputs, compare against the flattened size
+        # since downstream flattening happens automatically.
+        expected_dim = (
+            spec.get("node_dim")
+            if spec["input"] == "precomputed_node"
+            else spec.get("dim")
+        )
+        actual_dim = (
+            data.shape[-1]
+            if spec["input"] == "precomputed_node"
+            else int(np.prod(data.shape))
+        )
+        assert expected_dim == actual_dim, (
+            f"Precomputed embedding dimension mismatch for {spec['input']} modality '{precomputed_colname}': expected {expected_dim}, got {actual_dim}"
+        )
     return data
