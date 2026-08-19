@@ -93,7 +93,7 @@ module:
     #   output_dim: 1fal
     #   multimodal: true
 data:
-  filename: merged_data_deduplicated_with_benchmarks_log_final.csv # merged_data_deduplicated_with_benchmarks_n=56k.csv
+  filename: final_data.csv # merged_data_deduplicated_with_benchmarks_n=56k.csv
   num_workers: 8 # 128
   batch_size: 1024 # divided across n GPUs
   drop_last: true
