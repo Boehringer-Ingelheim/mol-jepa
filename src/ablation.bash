@@ -11,7 +11,7 @@
 
 . ../../.jepa/bin/activate
 
-export version=param_01
+export version=mod_all
 
 echo "Run version: $version"
 echo "GPU name: $(nvidia-smi --query-gpu=gpu_name --format=csv,noheader)"

@@ -4,4 +4,4 @@
 #SBATCH --time=30-00:00:00
 
 . ../../.jepa/bin/activate
-python train.py --config-name moljepa_slurm
+python train.py --config-name moljepa_hp
