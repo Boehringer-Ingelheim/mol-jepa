@@ -1,4 +1,4 @@
-torch==2.8.0
+torch==2.13.0
 lightning==2.6.1           
 torch-geometric==2.7.0
 torchmetrics==1.8.2
