@@ -11,7 +11,7 @@ achieve competitive performance, marking an important step towards more comprehe
 foundation models. 
 
 
-📄 [Paper](LINK) | 🤗 [Model](https://huggingface.co/Flogrammer/Mol-JEPA) | 🤗 [Dataset](https://huggingface.co/datasets/Flogrammer/Mol-JEPA-dataset)
+📄 [Paper](https://arxiv.org/abs/2608.22642) | 🤗 [Model](https://huggingface.co/Flogrammer/Mol-JEPA) | 🤗 [Dataset](https://huggingface.co/datasets/Flogrammer/Mol-JEPA-dataset)
 
 <img src="figures/overview.png" alt="Mol-JEPA" width="500" />
 
@@ -50,6 +50,7 @@ print("Latent embeddings shape:", out.embeddings.shape) # batch size, modalities
 >>> Latent embeddings shape: torch.Size([2, 13, 512])
 ```
 
+Note that while TabICL + CLS tokens is the quickest way, it might not always lead to the best performance. We encourage to experiment with other embeddings and probe models, as we experienced quite some variance in performance across datasets. 
 
 ## Training
 
@@ -127,7 +128,7 @@ Our plots and results can be generated using the following notebooks. Below you 
 - 02_embedding_analysis: UMAP visualization of modality representations and CKA comparison
 - 03_downstream_prediction: Cross-validation and public split evaluation and downstream training
 
-To run the notebooks, you als need to set these several environment variables, such as:
+To run the notebooks, you also need to set several environment variables, such as:
 ```bash
 export PROCESSED_DIR="/path/to/processed/data"
 export BENCHMARKS_DIR="/path/to/benchmark/results"
@@ -141,13 +142,14 @@ export CLUSTER_SPLITS_DIR="/path/to/split/files"
 If you use MOL-JEPA in your research, please cite:
 
 ```bibtex
-@article{moljepa,
-  title   = {MOL-JEPA: A Multimodal Joint Embedding Predictive Architecture for Molecules},
-  author  = {Rottach, Florian and Schieferdecker, Sebastian and Rudman, William and Balestriero, Randall and Eickhoff, Carsten},
-  journal = {arXiv preprint},
-  year    = {XXXX},
-  note    = {Manuscript in preparation},
-  affiliation = {University of T{\"u}bingen; Boehringer Ingelheim; The University of Texas at Austin; Brown University}
+@misc{rottach2026moljepamultimodaljointembedding,
+      title={Mol-JEPA: A multimodal Joint Embedding Predictive Architecture for Molecules}, 
+      author={Florian Rottach and Sebastian Schieferdecker and William Rudman and Randall Balestriero and Carsten Eickhoff},
+      year={2026},
+      eprint={2608.22642},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2608.22642}, 
 }
 ```
 

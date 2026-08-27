@@ -1,0 +1,267 @@
+seed: 42
+trainer:
+  _target_: lightning.Trainer
+  max_epochs: 1000
+  accelerator: gpu
+  strategy: ddp_find_unused_parameters_true
+  devices: 1
+  num_nodes: 1
+  precision: 32
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 2
+  num_sanity_val_steps: 0
+  enable_checkpointing: true
+  logger:
+    _target_: lightning.pytorch.loggers.TensorBoardLogger
+    name: mol-jepa
+    save_dir: ./logs/
+    version: null
+module:
+  optimizer:
+    lr: 0.0005
+    weight_decay: 0.01
+  modalities: ${data.modalities}
+  labels: ${data.labels}
+  train_config:
+    label_strategy: ${data.label_strategy}
+    loss_projection: false
+    cls_sigreg: false
+    cls_predictor: false
+    weighted_loss: false
+    weights: ${data.weights}
+    masking_ratio: 0.1
+    lambda: 0.7
+  moe_encoder:
+    hidden_dim: 512 
+    attn_heads: 4
+    attn_layers: 2
+    dropout: 0.1
+  expert_encoders:
+    graph_encoder:
+      layers: 3
+      layer_type: TransformerConv
+      hidden_dim: ${module.moe_encoder.hidden_dim}
+      output_dim: ${module.moe_encoder.hidden_dim}
+      activation: gelu
+      dropout: ${module.moe_encoder.dropout}
+      attn_heads: 8
+      pooling: max
+    emb_encoder:
+      layers: 3
+      hidden_dim: ${module.moe_encoder.hidden_dim}
+      output_dim: ${module.moe_encoder.hidden_dim}
+      activation: gelu
+      dropout: ${module.moe_encoder.dropout}
+    atom_encoder:
+      layers: 1
+      hidden_dim: ${module.moe_encoder.hidden_dim}
+      output_dim: ${module.moe_encoder.hidden_dim}
+      attn_heads: 4
+      dropout: ${module.moe_encoder.dropout}
+  probes:
+    - name: linear
+      input_dim: ${module.moe_encoder.hidden_dim}
+      variant: linear
+      output_dim: 1
+      multimodal: false
+    # - name: nonlinear
+    #   input_dim: ${module.moe_encoder.hidden_dim}
+    #   variant: nonlinear
+    #   hidden_dim: 256
+    #   output_dim: 1
+    #   multimodal: false
+    # - name: multimodal_linear
+    #   input_dim: ${module.moe_encoder.hidden_dim}
+    #   variant: linear
+    #   output_dim: 1
+    #   multimodal: true
+    - name: multimodal_nonlinear
+      input_dim: ${module.moe_encoder.hidden_dim}
+      variant: nonlinear
+      hidden_dim: 256
+      output_dim: 1
+      multimodal: true
+    # - name: multimodal_transformer
+    #   input_dim: ${module.moe_encoder.hidden_dim}
+    #   variant: transformer
+    #   output_dim: 1fal
+    #   multimodal: true
+data:
+  filename: subset_dense_100k.csv # merged_data_deduplicated_with_benchmarks_n=56k.csv
+  num_workers: 8 # 128
+  batch_size: 128 # divided across n GPUs
+  drop_last: true
+  shuffle: false
+  recreate: false
+  use_memmap: false
+  use_ragged_memmap: false
+  use_cache: false
+  metadata_cols:
+    - smiles
+    - dataset
+    - chembl_id
+    - provided_split
+  weights:
+    - name: chembl_targets
+      weight: 188.5
+    - name: tdc_targets
+      weight: 182.81
+    - name: pcba_targets
+      weight: 152.01
+    - name: nabla_targets
+      weight: 145.79
+    - name: moe
+      weight: 1.05
+    - name: boltz
+      weight: 198.72
+    - name: uma
+      weight: 150.69
+    - name: chemgpt
+      weight: 1.0
+    - name: graph
+      weight: 1.0
+  modalities:
+  - name: chemgpt
+    input: precomputed
+    output: embedding
+    colname: chemgpt_embedding_path
+    dim: 2048
+    processing: multiprocess
+  - name: cloome
+    input: precomputed
+    output: embedding
+    colname: cloome_embedding_path
+    dim: 512
+    processing: multiprocess
+  - name: graph
+    input: smiles
+    output: graph
+    node_dim: 82
+    edge_dim: 17
+    processing: multiprocess
+  - name: ecfp
+    input: smiles
+    output: embedding
+    dim: 2048
+    processing: batch
+    batch_size: 64
+  - name: uma
+    input: precomputed_node
+    output: atoms
+    colname: uma_embedding_path
+    node_dim: 128
+    processing: multiprocess
+  - name: boltz
+    input: precomputed
+    output: embedding
+    colname: boltz_embedding_path
+    dim: 6912
+    processing: multiprocess
+  - name: boltz_preds
+    input: precomputed
+    output: embedding
+    colname: boltz_preds_path
+    dim: 36
+    processing: multiprocess
+  - name: moe
+    input: precomputed
+    output: embedding
+    colname: moe_descriptors_path
+    dim: 227
+    processing: multiprocess
+  - name: bioxmol
+    input: precomputed
+    output: embedding
+    colname: bioxmol_embedding_path
+    dim: 1024
+    processing: multiprocess    
+  labels:
+  - name: chembl_targets
+    colname: chembl_targets_path
+    dim: 306
+  - name: tdc_targets
+    colname: tdc_targets_path
+    dim: 672
+  - name: pcba_targets
+    colname: pcba_targets_path
+    dim: 1328
+  - name: nabla_targets
+    colname: nabla_targets_path
+    dim: 17
+  - name: xtb_targets
+    colname: xtb_targets_path
+    dim: 7
+  label_strategy: modality # modality, label, none
+  benchmark_labels:
+    # pxr: 
+    #   type: regression
+    #   labels:
+    #   - pEC50
+    # asap_potency: 
+    #   type: regression
+    #   labels:
+    #   - pIC50 (MERS-CoV Mpro) 
+    #   - pIC50 (SARS-CoV-2 Mpro)
+    # asap_admet:
+    #   type: regression
+    #   labels:
+    #   - log_HLM 
+    #   - log_KSOL
+    #   - LogD 
+    #   - log_MDR1-MDCKII 
+    #   - log_MLM 
+    # biogen_adme:
+    #   type: regression
+    #   labels:
+    #   - hlm_clint
+    #   - mdr1_mdck_er
+    #   - plasma_protein_binding_human
+    #   - plasma_protein_binding_rat
+    #   - rlm_clint
+    #   - solubility_ph_6_8
+    # tox21_linz:
+    #   type: classification
+    #   labels:
+    #   - NR-AR
+    #   - NR-AR-LBD
+    #   - NR-AhR
+    #   - NR-Aromatase
+    #   - NR-ER
+    #   - NR-ER-LBD
+    #   - NR-PPAR-gamma
+    #   - SR-ARE
+    #   - SR-ATAD5
+    #   - SR-HSE
+    #   - SR-MMP
+    #   - SR-p53
+    expansionrx:
+      type: regression
+      labels:
+      - log_Caco-2 Permeability Efflux
+      - log_Caco-2 Permeability Papp A
+      - log_HLM CLint
+      - log_KSOL
+      - LogD
+      - log_MBPB
+      - log_MGMB
+      - log_MLM CLint
+      - log_MPPB
+    # bindingdb954:
+    #   type: regression
+    #   labels:
+    #   - pKi_954
+    # bindingdb962:
+    #   type: regression
+    #   labels:
+    #   - pKi_962
+    # bindingdb963:
+    #   type: regression
+    #   labels:
+    #   - pKi_963
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: false
