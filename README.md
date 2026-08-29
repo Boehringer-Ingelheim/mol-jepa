@@ -127,6 +127,11 @@ Our plots and results can be generated using the following notebooks. Below you 
 - 01_data_pipeline: Contains the processing code to create the full dataset
 - 02_embedding_analysis: UMAP visualization of modality representations and CKA comparison
 - 03_downstream_prediction: Cross-validation and public split evaluation and downstream training
+- 04_results: Metric computations and summary plots
+- 05_loss: Loss visualizations
+- 06_scaling: Modality and dataset size scaling analysis
+- 07_modalities: Importance of modalities evaluated through different approaches
+- 08_attention: Attention importance analysis
 
 To run the notebooks, you also need to set several environment variables, such as:
 ```bash
