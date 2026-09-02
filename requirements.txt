@@ -13,7 +13,7 @@ tqdm==4.67.1
 python-dotenv==1.2.1
 rdkit==2026.3.4
 molfeat==0.10.1             
-transformers==4.50.3        
+transformers==5.10.1        
 fairchem-core==2.17.0       
 ase==3.27.0       
 matplotlib==3.10.8
