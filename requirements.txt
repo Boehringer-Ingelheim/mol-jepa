@@ -8,7 +8,7 @@ stable_pretraining==0.1.6
 tensorboard==2.20.0         
 numpy==1.26.4
 pandas==2.3.3
-pyarrow==20.0.0            
+pyarrow==23.0.1            
 tqdm==4.67.1
 python-dotenv==1.2.1
 rdkit==2026.3.4
