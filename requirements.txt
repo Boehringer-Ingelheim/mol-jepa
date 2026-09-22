@@ -10,7 +10,7 @@ numpy==1.26.4
 pandas==2.3.3
 pyarrow==20.0.0            
 tqdm==4.67.1
-python-dotenv==1.2.1
+python-dotenv==1.2.2
 rdkit==2026.3.4
 molfeat==0.10.1             
 transformers==4.50.3        
